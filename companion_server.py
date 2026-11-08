@@ -274,7 +274,15 @@ class CompanionHandler(d.DashboardHandler):
 def run():
     config = json.loads((ROOT / 'companion.json').read_text(encoding='utf-8'))
     d._ensure_schema()
-    server = d.DashboardServer(('127.0.0.1', config.get('port', 8081)), CompanionHandler)
+    # 묶을 주소 — 기본은 127.0.0.1. 테일넷에서 열려면 companion.json 의 host 에 Tailscale 주소를 적는다.
+    # 0.0.0.0 · :: 는 LAN 전체에 열리므로 거부한다.
+    host = str(config.get('host') or '127.0.0.1').strip()
+    if host in ('0.0.0.0', '::', ''):
+        raise SystemExit(f'companion.json host={host!r} 는 허용하지 않는다 — Tailscale 주소 하나를 적는다')
+    # Host · Origin 검사가 받아들일 이름 — 묶은 주소와 그 기계의 MagicDNS 이름(extra_hostnames)
+    extra = [str(h).strip().lower().rstrip('.') for h in config.get('extra_hostnames', []) if str(h).strip()]
+    d.ALLOWED_HOSTNAMES = tuple(dict.fromkeys(list(d.ALLOWED_HOSTNAMES) + [host.lower()] + extra))
+    server = d.DashboardServer((host, config.get('port', 8081)), CompanionHandler)
     token_path = ROOT / 'data' / 'solomon-bridge.token'
     if not token_path.exists():
         token_path.write_text(secrets.token_urlsafe(48), encoding='utf-8')
@@ -284,7 +292,7 @@ def run():
         import threading
         threading.Thread(target=d.resume_interrupted_missions, name='director-mission-resume', daemon=True).start()
     server.stopping = False
-    print('AI DEV × SOLOMON http://127.0.0.1:' + str(server.server_address[1]), flush=True)
+    print(f'AI DEV × SOLOMON http://{host}:' + str(server.server_address[1]), flush=True)
     try:
         server.serve_forever()
     finally:

@@ -1,4 +1,9 @@
 {
+  "host": "100.105.211.34",
+  "extra_hostnames": [
+    "mbp16-m1",
+    "mbp16-m1.tail31d19e.ts.net"
+  ],
   "port": 8081,
   "allowed_projects": []
 }
