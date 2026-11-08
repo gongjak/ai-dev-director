@@ -263,6 +263,11 @@ class SafetyPolicy:
                 if not subtree:
                     return True
                 return target_norm == subtree or target_norm.startswith(subtree + "/")
+            # 저장소 루트("" · ".")는 파이썬 버전마다 답이 다르다 — 3.12 까지는 PurePosixPath(".").match("**") 가 True,
+            # 3.13 부터 False. 안전 판정이 해석기 버전에 따라 바뀌지 않도록 검증된 3.13+ 동작으로 고정한다
+            # (루트 전체를 덮는 "**/" · "/**" 규칙은 위 분기가 따로 처리한다)
+            if target_norm in ("", "."):
+                return False
             try:
                 return PurePosixPath(target_norm).match(rule_norm)
             except (TypeError, ValueError):

@@ -179,7 +179,9 @@ class ProcessTreeRunner:
         # test explicitly opted in (integration_cli marker sets DIRECTOR_ALLOW_REAL_CLI=1). This prevents mock tests
         # from consuming real quota or hanging for the full CLI timeout.
         if os.environ.get("DIRECTOR_TESTING") == "1" and os.environ.get("DIRECTOR_ALLOW_REAL_CLI") != "1":
-            base = os.path.basename(str(argv[0])).lower() if argv else ""
+            # POSIX 의 os.path.basename 은 역슬래시를 구분자로 보지 않아 Windows 경로가 통째로 남는다 —
+            # 두 구분자를 모두 잘라 어느 OS 에서든 같은 이름으로 판정한다(차단을 약하게 하지 않는다)
+            base = str(argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower() if argv else ""
             if base in REAL_CLI_BASENAMES:
                 cls.blocked_real_cli_calls.append(list(argv))
                 raise RealCliCallDuringUnitTest(

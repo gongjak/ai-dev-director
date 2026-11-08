@@ -424,13 +424,17 @@ def test_k_lock_token_replaced_during_recovery_not_deleted(tmp_path, monkeypatch
 
 # ------------------------------------------------------------------ TEST L: resolve_cli PermissionError
 
-def test_l_resolve_cli_permission_error_no_crash(monkeypatch):
+def test_l_resolve_cli_permission_error_no_crash(monkeypatch, tmp_path):
     monkeypatch.setattr(env_utils.shutil, "which", lambda name: None)
+    # 이 기계에 실제로 깔린 CLI(~/.local/bin · Homebrew)를 찾지 않도록 POSIX 설치 자리를 가린다
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr("core.provider_manager.resolve_cli", env_utils.resolve_cli)   # real resolver (conftest stubs it)
     real_exists = Path.exists
     def exploding_exists(self):
         if "npm" in str(self) or "agy" in str(self):
             raise PermissionError(5, "Access is denied")
+        if str(self).startswith(("/opt/homebrew/", "/usr/local/")):
+            return False
         return real_exists(self)
     monkeypatch.setattr(Path, "exists", exploding_exists)
     for name in ("claude", "codex", "agy"):

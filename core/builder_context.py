@@ -1,4 +1,5 @@
 """Bounded, explicitly referenced document input for the proposal Builder."""
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -11,6 +12,10 @@ def referenced_documents(order):
     # A drive letter that starts a token (not the 'p' of 'http://', not a URL scheme '://') begins a document path.
     # A path never contains = * ? ' ( ): a sentence such as "E:\proj = a game ... see notes.md" is prose, not one path.
     paths += re.findall(r'(?<![A-Za-z0-9])[A-Za-z]:[/\\](?![/\\])[^\r\n"<>|`=*?\x27()]*?\.(?:docx|md|txt)(?=[\s"\x27`)\],;:]|$)', text, re.I)
+    if os.name != 'nt':
+        # macOS/Linux 절대경로(/...)도 문서 경로다. 낱말 첫머리의 '/' 만 본다 — 'http://h:1/v1' 의 '/v1',
+        # 'docs/SPEC.md' 의 '/SPEC.md' 처럼 앞에 글자 · ':' · '/' · '.' 이 붙은 것은 경로의 시작이 아니다
+        paths += re.findall(r'(?<![A-Za-z0-9:/.~\\-])/(?![/\\])[^\r\n"<>|`=*?\x27()]*?\.(?:docx|md|txt)(?=[\s"\x27`)\],;:]|$)', text, re.I)
     documents = {}
     for value in dict.fromkeys(paths):
         path = Path(value)

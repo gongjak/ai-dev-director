@@ -34,7 +34,8 @@ def context() -> Dict[str, Any]:
 
 
 def provider_of(argv0: str) -> Optional[str]:
-    base = os.path.basename(str(argv0 or "")).lower()
+    # POSIX 의 basename 은 역슬래시를 자르지 않는다 — 두 구분자를 모두 잘라 OS 와 무관하게 이름을 뽑는다
+    base = str(argv0 or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
     return PROVIDER_BY_CLI.get(base.split(".")[0])
 
 

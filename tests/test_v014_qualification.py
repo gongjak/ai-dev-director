@@ -1,6 +1,7 @@
 import os
 import json
 import subprocess
+import sys
 import tempfile
 import pytest
 from pathlib import Path
@@ -67,7 +68,7 @@ def test_a2_permission_guard_hook_blocks_escapes():
         def run_guard(tool_name: str, args: dict) -> dict:
             payload = json.dumps({"toolCall": {"name": tool_name, "args": args}})
             res = subprocess.run(
-                ["python", str(guard_script)],
+                [sys.executable, str(guard_script)],
                 input=payload,
                 text=True,
                 capture_output=True,
@@ -77,7 +78,8 @@ def test_a2_permission_guard_hook_blocks_escapes():
             return json.loads(res.stdout.strip())
 
         # Escape 1: Outside worktree write
-        r1 = run_guard("write_to_file", {"TargetFile": "C:/temp/escape.txt"})
+        # "C:/temp/..." 는 POSIX 에서 작업 폴더 안의 상대경로라 탈출이 아니다 — 어느 OS 에서나 바깥인 절대경로를 쓴다
+        r1 = run_guard("write_to_file", {"TargetFile": str(wt.parent / "escape.txt")})
         assert r1["decision"] == "deny"
         assert "outside allowed worktree" in r1["reason"]
 

@@ -200,7 +200,9 @@ def _free_port():
 
 
 def _listeners_on(port):
-    return [c for c in psutil.net_connections(kind="tcp")
+    # 서버는 같은 프로세스 안에서 돈다 — macOS 는 남의 프로세스 소켓을 root 없이 못 읽으므로
+    # 전체 조회(psutil.net_connections) 대신 이 프로세스의 소켓만 본다
+    return [c for c in psutil.Process().net_connections(kind="tcp")
             if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port]
 
 

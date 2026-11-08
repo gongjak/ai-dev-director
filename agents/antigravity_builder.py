@@ -285,7 +285,8 @@ except Exception as e:
                         "matcher": "*",
                         "hooks": [
                             {
-                                "command": f"python {guard_script.as_posix()}"
+                                # macOS 에는 `python` 이 없다 — 없으면 관문이 아예 돌지 않으므로 지금 해석기를 절대경로로 적는다
+                                "command": f'"{Path(sys.executable).as_posix()}" "{guard_script.as_posix()}"'
                             }
                         ]
                     }

@@ -3,6 +3,7 @@ v0.2.4.6 RESULT CENTER — view / test results / open worktree / apply & verify 
 pending results. No merge, commit, push, stash or reset; every target path is canonically re-checked.
 """
 import os
+import sys
 import json
 import subprocess
 import threading
@@ -84,14 +85,15 @@ def test_d_open_worktree_canonical_only(rm, monkeypatch):
         run_id, orch = _pass_run(proj)
         calls = []
         monkeypatch.setattr("core.result_manager.subprocess.Popen", lambda argv, **k: calls.append(argv))
-        monkeypatch.setattr("core.result_manager.os.name", "nt")
+        # os.name 을 "nt" 로 바꾸면 os 모듈 전체가 바뀌어 POSIX 경로 판정이 깨진다 — 이 OS 의 파일 관리자를 기대한다
+        fm = "explorer.exe" if os.name == "nt" else ("open" if sys.platform == "darwin" else "xdg-open")
         assert rm.open_worktree(run_id)["status"] == "ok"
-        assert calls == [["explorer.exe", str(Path(orch.sm.get_run(run_id)["worktree_path"]).resolve())]]
+        assert calls == [[fm, str(Path(orch.sm.get_run(run_id)["worktree_path"]).resolve())]]
         # tampered worktree path outside .director_worktrees -> refused, explorer not called
         with orch.sm._get_conn() as c:
             c.execute("UPDATE runs SET worktree_path=? WHERE run_id=?", (str(Path(proj).resolve()), run_id)); c.commit()
         assert rm.open_worktree(run_id)["status"] == "refused" and len(calls) == 1
-        assert rm.open_project(run_id)["status"] == "ok" and calls[-1] == ["explorer.exe", str(Path(proj).resolve())]
+        assert rm.open_project(run_id)["status"] == "ok" and calls[-1] == [fm, str(Path(proj).resolve())]
 
 
 # ------------------------------------------------------------------ E/N: clean main + same HEAD -> apply, verify, no commit

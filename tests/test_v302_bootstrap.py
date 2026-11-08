@@ -53,7 +53,9 @@ def test_snapshot_excludes_untracked_sensitive_directories(tmp_path):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text('{}')
     sha = snapshot(p)
-    assert git(p, 'ls-tree', '-r', '--name-only', sha) == ''
+    # 비밀 · 자격 폴더만 빠진다. 'data/*.json' 은 다음 마일스톤에 넘겨야 하는 자료라 일부러 담는다
+    # (core/bootstrap.py SUFFIXES 주석 — README 가 말한 「스냅샷 제외 목록 픽스처 드리프트」)
+    assert git(p, 'ls-tree', '-r', '--name-only', sha) == 'data/fixture.json'
 
 def test_control_root_rejected():
     from core.bootstrap import SOURCE_ROOT

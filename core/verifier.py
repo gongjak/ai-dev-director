@@ -22,6 +22,10 @@ class Verifier:
             # with: an inherited PYTHONIOENCODING/PYTHONUTF8 once hid a CLI that breaks in a normal cp949 terminal.
             for leaked in ("PYTHONIOENCODING", "PYTHONUTF8", "PYTHONLEGACYWINDOWSSTDIO"):
                 env.pop(leaked, None)
+            # 검증 결과가 낡은 바이트코드에 속지 않게 한다 — .pyc 는 원본의 mtime(초 단위)과 크기로만 유효를 판정하므로
+            # 수리 빌더가 같은 초 안에 같은 크기로 고치면(x * 3 → x * 2) 고치기 전 코드가 그대로 시험된다.
+            # macOS(APFS)에서 수리 라운드가 1초 안에 끝나 실제로 재현됐다
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
             cwd_str = str(cwd)
             current_ppath = env.get("PYTHONPATH", "")
             env["PYTHONPATH"] = f"{cwd_str}{os.pathsep}{current_ppath}" if current_ppath else cwd_str

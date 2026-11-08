@@ -56,27 +56,29 @@ def resolve_cli(name: str) -> Optional[str]:
         except (PermissionError, OSError):
             return str(p)
 
-    local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
-    app_data = Path(os.environ.get("APPDATA", ""))
+    # 환경변수가 비어 있으면(macOS/Linux) Path("") 가 상대경로 "npm/claude" 를 만들어
+    # 현재 작업 폴더의 파일을 CLI 로 집을 수 있다 — 그런 후보는 아예 만들지 않는다
+    _lad = os.environ.get("LOCALAPPDATA", "")
+    _ad = os.environ.get("APPDATA", "")
+    local_app_data = Path(_lad) if _lad else None
+    app_data = Path(_ad) if _ad else None
     home = Path.home()
     # macOS/Linux (unverified): native installer -> ~/.local/bin, Homebrew -> /opt/homebrew/bin, npm -g -> /usr/local/bin
     posix_dirs = [home / ".local" / "bin", Path("/opt/homebrew/bin"), Path("/usr/local/bin")]
 
     known = {
         "claude": [
-            app_data / "npm" / "claude.cmd",
-            app_data / "npm" / "claude",
+            *([app_data / "npm" / "claude.cmd", app_data / "npm" / "claude"] if app_data else []),
             *[d / "claude" for d in posix_dirs],
             home / ".claude" / "local" / "claude",
         ],
         "codex": [
-            app_data / "npm" / "codex.cmd",
-            app_data / "npm" / "codex",
+            *([app_data / "npm" / "codex.cmd", app_data / "npm" / "codex"] if app_data else []),
             *[d / "codex" for d in posix_dirs],
         ],
         "agy": [
-            local_app_data / "agy" / "bin" / "agy.exe",
-            local_app_data / "agy" / "bin" / "agy.cmd",
+            *([local_app_data / "agy" / "bin" / "agy.exe", local_app_data / "agy" / "bin" / "agy.cmd"]
+              if local_app_data else []),
             *[d / "agy" for d in posix_dirs],
             home / ".agy" / "bin" / "agy",
         ]
