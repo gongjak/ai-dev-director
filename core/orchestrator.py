@@ -756,7 +756,9 @@ class Orchestrator:
                     new_files[rel] = p.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 pass
-        money, _ = SafetyPolicy.apply_waivers(autopilot.money_code_findings(diff, new_files), waivers)
+        from core import owner_policy
+        money, _ = SafetyPolicy.apply_waivers(autopilot.money_code_findings(diff, new_files)
+                                               + owner_policy.code_findings(diff, new_files), waivers)
         if money:
             msg = "Scope violation: " + "; ".join(money)
             logger.warning(f"Money-moving code detected before test execution: {msg}")

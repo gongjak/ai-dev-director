@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from core import owner_policy
 from core.safety import SafetyPolicy
 from schemas.order import OrderSchema
 
@@ -78,12 +79,14 @@ def serious_terms_in(text: str) -> List[str]:
 
 def is_serious_text(text: str) -> bool:
     """HEAD escalations are kept only for the delegated-exception categories."""
-    return (text or "").strip().upper().startswith("USER_DECISION") or bool(serious_terms_in(text))
+    return ((text or "").strip().upper().startswith("USER_DECISION") or bool(serious_terms_in(text))
+            or bool(owner_policy.hard_stop_reasons(text)))
 
 
 USER_STOP_MARKERS = (
     "USER_DECISION", "Live money code", "Control plane modified", "Path escapes worktree", "Protected path modified",
     "File modified outside allowed_paths", "PROVIDER_FAILURE", "No usable provider",
+    owner_policy.OWNER_PREFIX, owner_policy.OUT_OF_SCOPE_PREFIX, "OWNER_ONLY:", "OUT_OF_SCOPE:",
 )
 
 
@@ -318,6 +321,11 @@ JUDGED_ENTRY_CODES = {"HIGH_RISK", "EXPLICIT_HUMAN_APPROVAL_REQUESTED"}
 def proxy_verdict(head, question: str, evidence: Dict[str, Any], cwd: Optional[str] = None) -> Tuple[bool, str, str]:
     """(approve, reason, source). HEAD decides as the user's proxy; if HEAD cannot be reached the user's
     written policy is applied deterministically (escalate only on money/credential indicators)."""
+    # 소유자 범주 · HEAD 범위 밖은 HEAD 에 묻지 않고 멈춘다 — HEAD 의 APPROVE 로 뒤집히지 않는다
+    # 질문 글은 정책 범주 이름을 늘 담고 있으므로 보지 않는다 — 판정 대상(scan_text)만 본다
+    hard = owner_policy.hard_stop_reasons(str(evidence.get("scan_text", "")))
+    if hard:
+        return False, "owner policy hard stop: " + ", ".join(hard), "POLICY_HARD"
     fn = getattr(head, "proxy_decide", None)
     last = None
     if fn is not None:
@@ -371,6 +379,11 @@ def entry_gate(order: OrderSchema, project_path: Optional[str], head, cwd: Optio
     if not order.allowed_paths and (order.max_files_changed or order.max_diff_lines):
         return {"order": order, "notes": notes, "approved": [],
                 "escalate": "APPROVAL_REQUIRED: AMBIGUOUS_SCOPE (HEAD could not name any writable path)"}
+    hard = owner_policy.hard_stop_reasons(order_text(order))
+    if hard:
+        notes.append("owner policy (POLICY_HARD): ESCALATE - " + ", ".join(hard))
+        return {"order": order, "notes": notes, "approved": [],
+                "escalate": "APPROVAL_REQUIRED: USER_DECISION_REQUIRED (" + ", ".join(hard) + ")"}
     blocking = [r for r in reasons if _code(r) not in AUTO_ENTRY_CODES | JUDGED_ENTRY_CODES]
     if blocking:
         return {"order": order, "notes": notes, "approved": [], "escalate": "APPROVAL_REQUIRED: " + "; ".join(blocking)}

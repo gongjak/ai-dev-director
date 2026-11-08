@@ -19,6 +19,11 @@ def get_sanitized_env() -> Dict[str, str]:
     env = os.environ.copy()
     for k in FORBIDDEN_API_KEYS:
         env.pop(k, None)
+    # macOS 실측(2026-11-08): 사용자 claude 에 oh-my-claudecode 훅이 깔려 있으면 작업 폴더에 .omc/ 상태 파일을 쓴다.
+    # 격리 작업본 · 조사 폴더를 더럽혀 RESEARCH_READ_ONLY_VIOLATION 과 자동 적용 충돌을 낸다. 하위 CLI 에서는 끈다.
+    # DISABLE_OMC 만으로는 상태 파일이 남는다(실측) — OMC_STATE_DIR 로 상태를 Director data/ 밖 폴더로 옮긴다.
+    env.setdefault("DISABLE_OMC", "1")
+    env.setdefault("OMC_STATE_DIR", str(Path(__file__).resolve().parent.parent / "data" / "cli-omc-state"))
     return env
 
 def resolve_cli(name: str) -> Optional[str]:
@@ -143,3 +148,15 @@ def probe_version(executable, timeout: float = 5.0, arg: str = "--version") -> s
         return "UNKNOWN"
     first = (res.stdout or "").strip().split("\n")[0].strip()
     return first or "UNKNOWN"
+
+
+# Claude 역할은 opus 로만 돈다 (포크 정책). 계정 기본 모델에 맡기지 않고 명령 줄에 적는다.
+CLAUDE_MODEL_DEFAULT = "opus"
+
+
+def claude_model_args() -> list:
+    """claude CLI 에 붙일 --model 인자. DIRECTOR_CLAUDE_MODEL 로 바꿀 수 있으나 sonnet 은 거부한다."""
+    model = (os.environ.get("DIRECTOR_CLAUDE_MODEL") or CLAUDE_MODEL_DEFAULT).strip()
+    if "sonnet" in model.lower():
+        raise RuntimeError("CONFIG_ERROR: Sonnet 모델은 금지되어 있다 (DIRECTOR_CLAUDE_MODEL=" + model + ")")
+    return ["--model", model]

@@ -131,7 +131,8 @@ def test_entry_gate_policy_fallback_when_head_unreachable(tmp_path, goal, escala
     order = OrderSchema(goal=goal, risk_level="HIGH", allowed_paths=["src/**"], protected_paths=["credentials/**"])
     gate = autopilot.entry_gate(order, str(tmp_path), ProxyHead(raises=True))
     assert (gate["escalate"] is not None) is escalates      # protected 'credentials/**' alone never escalates
-    assert any("policy fallback" in n for n in gate["notes"])
+    # 포크 정책: 결제는 HEAD 에 묻기 전에 POLICY_HARD 로 멈춘다 (core/owner_policy.py)
+    assert any("policy fallback" in n or "POLICY_HARD" in n for n in gate["notes"])
 
 
 def test_whole_repo_scope_is_spelled_as_glob_and_control_plane_stays_denied(tmp_path):
