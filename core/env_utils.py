@@ -162,3 +162,16 @@ def claude_model_args() -> list:
     if "sonnet" in model.lower():
         raise RuntimeError("CONFIG_ERROR: Sonnet 모델은 금지되어 있다 (DIRECTOR_CLAUDE_MODEL=" + model + ")")
     return ["--model", model]
+
+
+# Collector(웹 자료 수집)만 haiku 로 돈다 — 공작 결정 2026-11-09. 받은 본문에서 값을 뽑기만 하므로 opus 가 필요 없다.
+# claude_model_args() 의 「opus 만」 정책은 그대로이고, 이 예외는 core/collector 에서만 쓴다.
+COLLECTOR_MODEL_DEFAULT = "haiku"
+
+
+def collector_model_args() -> list:
+    """Collector 용 --model 인자. DIRECTOR_COLLECTOR_MODEL 로 바꿀 수 있으나 sonnet 은 거부한다."""
+    model = (os.environ.get("DIRECTOR_COLLECTOR_MODEL") or COLLECTOR_MODEL_DEFAULT).strip()
+    if "sonnet" in model.lower():
+        raise RuntimeError("CONFIG_ERROR: Sonnet 모델은 금지되어 있다 (DIRECTOR_COLLECTOR_MODEL=" + model + ")")
+    return ["--model", model]

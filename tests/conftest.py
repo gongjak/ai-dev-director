@@ -30,6 +30,7 @@ _RESOLVE_CLI_SITES = (
     "agents.codex_reviewer.resolve_cli",
     "agents.claude_reviewer.resolve_cli",
     "agents.antigravity_builder.resolve_cli",
+    "core.collector.providers.resolve_cli",
 )
 
 
@@ -146,3 +147,21 @@ def provider_state(isolate_provider_db):
             pm.set_status(dom.upper(), ProviderStatus(st) if isinstance(st, str) else st, "provider_state fixture")
         return pm
     return _set
+
+
+@pytest.fixture(autouse=True)
+def collector_no_network(request, monkeypatch):
+    """Collector 의 기본 DNS 해석기 · 전송을 「부르면 예외」로 바꾼다 — 시험은 가짜를 주입해야만 웹에 닿는다.
+    전역 socket 은 막지 않는다(대시보드 · 동반 HTTP 시험이 localhost 를 쓴다). integration_cli 만 예외."""
+    if request.node.get_closest_marker("integration_cli") is not None:
+        return
+    from core.collector import netfetch
+
+    def _no_dns(host, port):
+        raise AssertionError(f"REAL_NETWORK_DURING_UNIT_TEST: DNS {host}")
+
+    class _NoTransport:
+        def request(self, **kw):
+            raise AssertionError(f"REAL_NETWORK_DURING_UNIT_TEST: {kw.get('host')}")
+    monkeypatch.setattr(netfetch, "default_resolver", _no_dns)
+    monkeypatch.setattr(netfetch, "default_transport_factory", _NoTransport)
