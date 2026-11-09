@@ -426,13 +426,24 @@ def builder_retry_feedback(error: str, order: OrderSchema) -> str:
     return "BUILDER RETRY NOTICE: " + " ".join(tips)
 
 
-def pick_alternative(pm, exclude: set, avoid: Optional[set] = None) -> Optional[str]:
-    """Another usable provider alias for a role (never one in `exclude`; prefers ones not in `avoid`)."""
+def pick_alternative(pm, exclude: set, avoid: Optional[set] = None,
+                     order: Optional[List[str]] = None) -> Optional[str]:
+    """Another usable provider alias for a role (never one in `exclude`; prefers ones not in `avoid`).
+    `order`(별칭 목록)를 주면 그 순서를 그대로 따른다 — avoid 로 순서를 바꾸지 않는다."""
     try:
         usable = set(pm.usable_domains()) if pm is not None else set(DOMAIN_PREFERENCE)
     except Exception:
         usable = set(DOMAIN_PREFERENCE)
     avoid = avoid or set()
+    if order:
+        # 설정에 적은 교체 순서 — 쓸 수 있고 시도하지 않은 첫 제공자
+        domain_by_alias = {a: d for d, a in ALIAS_BY_DOMAIN.items()}
+        domain_by_alias.update({"codex": "OPENAI", "agy": "GOOGLE", "google": "GOOGLE", "anthropic": "ANTHROPIC"})
+        for alias in order:
+            d = domain_by_alias.get(str(alias).lower())
+            if d and d in usable and d not in exclude:
+                return ALIAS_BY_DOMAIN[d]
+        return None
     cands = [d for d in DOMAIN_PREFERENCE if d in usable and d not in exclude]
     cands.sort(key=lambda d: d in avoid)
     return ALIAS_BY_DOMAIN[cands[0]] if cands else None

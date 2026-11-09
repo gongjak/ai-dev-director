@@ -294,7 +294,8 @@ class Orchestrator:
                 alt = None
             else:
                 others = {self._domain_of(roles[r]) for r in roles if r != role}
-                alt = autopilot.pick_alternative(self.pm, exclude={dom}, avoid=others)
+                alt = autopilot.pick_alternative(self.pm, exclude={dom}, avoid=others,
+                                                 order=(self.config.get(role) or {}).get("failover_order"))
             if alt is None:
                 return {"mode": FailoverMode.STOP, "down_providers": sorted(set(autopilot.DOMAIN_PREFERENCE) - usable),
                         "head_provider": req_head, "builder_provider": req_builder, "reviewer_provider": req_reviewer,
@@ -322,7 +323,8 @@ class Orchestrator:
                                                            ("reviewer", self.reviewer)) if r != role}
         if role == "builder" and self.config.get("builder", {}).get("mode") != "proposal":
             return False
-        alt = autopilot.pick_alternative(self.pm, exclude=set(tried), avoid=others)
+        order = (self.config.get(role) or {}).get("failover_order")
+        alt = autopilot.pick_alternative(self.pm, exclude=set(tried), avoid=others, order=order)
         if alt is None:
             return False
         old = self._get_agent_domain(getattr(self, role))

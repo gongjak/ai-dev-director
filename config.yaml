@@ -9,7 +9,8 @@ head:
 
 builder:
   mode: proposal          # Builder returns whole files as JSON; the Director validates and writes them.
-  provider: antigravity   # Primary BUILDER: Google Antigravity CLI (failover: codex / claude)
+  provider: antigravity   # Primary BUILDER: Google Antigravity CLI
+  failover_order: [claude, codex]   # agy 가 한도 등으로 못 쓰면 claude → codex 순서로 넘긴다 (2026-11-09 공작 지시)
   model: antigravity-cli
   executable: null        # Discovered automatically via resolve_cli('agy')
 
