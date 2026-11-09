@@ -67,6 +67,30 @@ class ResultManager:
             return None
         return json.loads(p.read_text(encoding="utf-8"))
 
+    def _review_accepted(self, run_id: str, ev: Dict[str, Any]) -> bool:
+        """리뷰 판정이 적용을 허락하는가. 리뷰가 pass 면 된다. 아니면 HEAD 프록시의 「P2 만 남은 PASS」
+        (core/orchestrator.py 의 minor-only 규칙)와 같은 조건 — 리뷰에 P0 · P1 이 없고 P2 가 있으며
+        HEAD 결정이 PASS — 일 때만 받는다. 리뷰 기록이 없거나 깨졌으면 받지 않는다(fail-closed)."""
+        verdict = ev.get("reviewer_verdict")
+        if verdict == "pass":
+            return True
+        if verdict != "changes_required":
+            return False
+        try:
+            review = self._load(run_id, "review.json") or {}
+            decision = self._load(run_id, "decision.json") or {}
+        except (ValueError, OSError):
+            return False  # 깨진 기록은 거부한다
+        if not isinstance(review, dict) or not isinstance(decision, dict):
+            return False
+        p1, p2 = review.get("p1") or [], review.get("p2") or []
+        # 오케스트레이터의 삭제 경고 조건을 여기서도 본다 — 그쪽 규칙이 바뀌어도 관문이 혼자 열리지 않게
+        texts = [str(x) for x in (list(p1) if isinstance(p1, list) else [p1]) + (list(p2) if isinstance(p2, list) else [p2])]
+        if any("remove" in t.lower() or "delet" in t.lower() for t in texts):
+            return False
+        return (review.get("verdict") == "changes_required" and not review.get("p0") and not p1
+                and bool(p2) and decision.get("decision") == "PASS")
+
     def _save(self, run_id: str, name: str, data) -> None:
         d = self.run_dir(run_id); d.mkdir(parents=True, exist_ok=True)
         (d / name).write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
@@ -347,7 +371,7 @@ class ResultManager:
         if st in (RESULT_APPLIED, RESULT_DISCARDED):
             blocks.append(f"Result already {st}")
         ev = self._load(run_id, "final_evidence.json") or {}
-        if not ev or ev.get("reasons") or ev.get("canonical_containment") != "PASS" or ev.get("verification") != "PASS" or ev.get("baseline") != "PASS" or ev.get("regression") != "PASS" or ev.get("reviewer_verdict") != "pass":
+        if not ev or ev.get("reasons") or ev.get("canonical_containment") != "PASS" or ev.get("verification") != "PASS" or ev.get("baseline") != "PASS" or ev.get("regression") != "PASS" or not self._review_accepted(run_id, ev):
             blocks.append("final_evidence is missing or not fully PASS")
         if not wt or not Path(wt).exists():
             blocks.append("Worktree missing")
@@ -651,7 +675,7 @@ class ResultManager:
         if st in (RESULT_APPLIED, RESULT_DISCARDED):
             blocks.append(f"Result already {st}")
         ev = self._load(run_id, "final_evidence.json") or {}
-        if not ev or ev.get("reasons") or ev.get("canonical_containment") != "PASS" or ev.get("verification") != "PASS" or ev.get("baseline") != "PASS" or ev.get("regression") != "PASS" or ev.get("reviewer_verdict") != "pass":
+        if not ev or ev.get("reasons") or ev.get("canonical_containment") != "PASS" or ev.get("verification") != "PASS" or ev.get("baseline") != "PASS" or ev.get("regression") != "PASS" or not self._review_accepted(run_id, ev):
             blocks.append("final_evidence is missing or not fully PASS")
         if not wt or not Path(wt).exists():
             blocks.append("Worktree missing")
