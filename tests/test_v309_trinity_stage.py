@@ -122,3 +122,9 @@ def test_only_one_folder_dialog_at_a_time_and_cancel_is_an_empty_path(monkeypatc
     monkeypatch.setattr(companion_server.subprocess, "run", fake_run)
     assert companion_server.pick_folder("E:/start") == {"path": ""}
     assert seen["argv"][1].endswith("pick_folder.py") and seen["argv"][2] == "E:/start"
+
+
+def test_pick_folder_helper_compiles():
+    # 도우미가 문법 오류면 서버는 매번 「열지 못했습니다」만 낸다 (2026-11-09 회귀)
+    import py_compile
+    py_compile.compile(str(Path(__file__).resolve().parents[1] / "scripts" / "pick_folder.py"), doraise=True)
