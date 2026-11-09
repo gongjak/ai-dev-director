@@ -1,6 +1,8 @@
 """산출물 · 증거 파일 · summary (설계 §8). 시각은 전부 KST."""
 import csv
+import io
 import json
+import os
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -28,10 +30,13 @@ def now_iso() -> str:
 
 
 def region_of(address: str, fallback: str) -> str:
+    """주소 첫 토큰이 시도(긴 이름 · 약칭)면 그 약칭, 아니면 known.sido — 「강남구」 를 region 에 쓰지 않는다."""
     first = (address or "").split(" ")[0] if address else ""
-    if not first:
-        return fallback or ""
-    return _SIDO_SHORT.get(first, first)
+    if first in _SIDO_SHORT:
+        return _SIDO_SHORT[first]
+    if first in set(_SIDO_SHORT.values()):
+        return first
+    return fallback or ""
 
 
 def steak_row(**values) -> Dict[str, str]:
@@ -68,20 +73,54 @@ def build_rows(schema: str, targets, accepted: List[dict], titles: Dict[str, str
     return STEAK_HEADER, rows
 
 
+RAW_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _open_w(path: Path, newline=None):
+    """심볼릭 링크를 따라가지 않고 쓴다 — 미리 놓인 링크로 out 밖의 파일을 덮지 못하게(O_NOFOLLOW → ELOOP)."""
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    return io.open(fd, "w", encoding="utf-8", newline=newline)
+
+
+def _write_text(path: Path, text: str) -> None:
+    with _open_w(path) as fh:
+        fh.write(text)
+
+
+def _mkdir_nofollow(path: Path) -> None:
+    path.mkdir(exist_ok=True)
+    if path.is_symlink():
+        raise OSError(f"OUTPUT_SYMLINK: {path} 가 심볼릭 링크다")
+
+
 def _jsonl(path: Path, rows: List[dict]) -> None:
-    with path.open("w", encoding="utf-8") as fh:
+    with _open_w(path) as fh:
         for r in rows:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def raw_within_limit(raw: List[dict], limit: int = RAW_MAX_BYTES) -> List[dict]:
+    """항목 단위로 앞에서부터 담는다 — 글자 단위로 자르면 JSON 이 깨진다."""
+    out, size = [], 2
+    for r in raw:
+        n = len(json.dumps(r, ensure_ascii=False).encode("utf-8")) + 2
+        if size + n > limit:
+            break
+        out.append(r)
+        size += n
+    return out
 
 
 def write_all(base: Path, *, order_json: dict, header: List[str], rows: List[dict], accepted: List[dict],
               rejected: List[dict], unverifiable: List[dict], claims: List[dict], raw: List[dict],
               llm_calls: List[dict], fetch_log: List[dict], pages: Dict[str, str], robots: Dict[str, str],
               summary: dict) -> None:
-    (base / "evidence" / "pages").mkdir(parents=True, exist_ok=True)
-    (base / "evidence" / "robots").mkdir(parents=True, exist_ok=True)
-    (base / "collect_order.json").write_text(json.dumps(order_json, ensure_ascii=False, indent=2), encoding="utf-8")
-    with (base / "accepted.csv").open("w", encoding="utf-8", newline="") as fh:
+    if base.is_symlink():
+        raise OSError(f"OUTPUT_SYMLINK: {base} 가 심볼릭 링크다")
+    for d in (base / "evidence", base / "evidence" / "pages", base / "evidence" / "robots"):
+        _mkdir_nofollow(d)
+    _write_text(base / "collect_order.json", json.dumps(order_json, ensure_ascii=False, indent=2))
+    with _open_w(base / "accepted.csv", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=header)
         w.writeheader()
         w.writerows(rows)
@@ -89,15 +128,14 @@ def write_all(base: Path, *, order_json: dict, header: List[str], rows: List[dic
     _jsonl(base / "rejected.jsonl", rejected)
     _jsonl(base / "unverifiable.jsonl", unverifiable)
     _jsonl(base / "claims.jsonl", claims)
-    raw_text = json.dumps(raw, ensure_ascii=False)
-    (base / "claims_raw.json").write_text(raw_text[:10 * 1024 * 1024], encoding="utf-8")
+    _write_text(base / "claims_raw.json", json.dumps(raw_within_limit(raw), ensure_ascii=False))
     _jsonl(base / "llm_calls.jsonl", llm_calls)
     _jsonl(base / "evidence" / "fetch_log.jsonl", fetch_log)
     for sha, text in pages.items():
-        (base / "evidence" / "pages" / f"{sha}.txt").write_text(text, encoding="utf-8")
+        _write_text(base / "evidence" / "pages" / f"{sha}.txt", text)
     for host, text in robots.items():
-        (base / "evidence" / "robots" / f"{host}.txt").write_text(text, encoding="utf-8")
-    (base / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_text(base / "evidence" / "robots" / f"{host}.txt", text)
+    _write_text(base / "summary.json", json.dumps(summary, ensure_ascii=False, indent=2))
 
 
 def reason_counts(*groups: List[dict]) -> Dict[str, int]:

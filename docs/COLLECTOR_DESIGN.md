@@ -110,6 +110,7 @@ source: claude
     "min_interval_sec_per_host": 3,
     "llm_timeout_sec": 300,
     "max_page_chars": 60000,
+    "max_total_bytes": 134217728,
     "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
   },
   "domains": {
@@ -127,7 +128,8 @@ source: claude
 | `order_id` | 산출물 · 증거 폴더 이름 | `[A-Za-z0-9._-]{1,64}` |
 | `purpose` | 사람 · HEAD 가 읽는 한 줄 | `owner_policy.hard_stop_reasons()`(`core/owner_policy.py:76-79`)에 걸리면 거부 |
 | `targets[]` | 모을 대상 | 1 ~ `limits.max_targets` 개 · `id` 유일 |
-| `targets[].known` | 이미 아는 값 — 이름 · 동네 · 시도 · 분류 | 문자열 ≤ 200자 · 제어문자 금지 |
+| `targets[].known` | 이미 아는 값 — 이름 · 동네 · 시도 · 분류 | 문자열 ≤ 200자 · 제어문자 금지 · **`name` 필수**(비면 지시서 거부 — 이름 근접 대조에 쓴다) |
+| `targets[].known.official_domain` | 선택 — 그 대상의 공식 사이트 도메인 | 있을 때만 `official_url` 을 받는다(§6.2). 없으면 공식 URL 후보는 `unverifiable(NEEDS_HUMAN_REVIEW)` |
 | `targets[].fields` | 모을 항목 | `address` · `official_url` · `status` 중에서. v1 은 이 셋뿐 |
 | `targets[].query_hint` | 검색어 제안 | ≤ 200자. 비면 `known` 으로 만든다 |
 | `targets[].urls` | 사람 · HEAD 가 아는 출처 URL | 선택 · ≤ `max_urls_per_target` 개. **있으면 URL 찾기 호출을 하지 않는다** |
@@ -142,6 +144,7 @@ source: claude
 | `limits.min_interval_sec_per_host` | 같은 호스트 요청 간격 | 기본 3 · 최소 1. `robots.txt` 의 `Crawl-delay` 가 더 크면 그 값 |
 | `limits.llm_timeout_sec` | LLM 호출 하나 시간 | 기본 300 · 최대 1800 |
 | `limits.max_page_chars` | 추출 호출에 넣는 본문 글자 상한 | 기본 60000 · 최대 200000. 넘으면 앞에서 자르고 `summary` 에 적는다 |
+| `limits.max_total_bytes` | 실행 전체에서 받은 바이트 상한(robots 포함) — 메모리 · 증거 크기를 묶는다 | 기본 128 MiB · 1 MiB ~ 1 GiB. 넘으면 남은 URL 은 `unverifiable(BYTES_EXHAUSTED)` |
 | `limits.user_agent` | 받기 · robots 요청의 UA | 기본은 위 Chrome 형 문자열. 근거 §4 — siksinhot 은 브라우저가 아닌 UA 에 403 을 준다. 공작 승인(「몇 백개 보낼 거 아니잖아」) 아래 저부하 조건(간격 · 상한 · robots)과 함께만 쓴다 |
 | `domains.allow` | 비어 있지 않으면 **이 등록 도메인만** 받아들인다 | 등록 도메인(eTLD+1) 또는 `host/pathprefix` |
 | `domains.deny` | 늘 거부 — URL 단계에서 걸러 받지 않는다 | 위와 같은 표기. 기본값은 위 JSON 의 목록 |
@@ -235,33 +238,37 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 
 | 단계 | 하는 일 | 실패 시 결과 |
 |---|---|---|
-| 1 URL 형식 | `https` 또는 `http` · userinfo 없음 · 호스트 있음 · 길이 ≤ 2048 · IDN 은 punycode 로 | `rejected(BAD_URL)` |
+| 1 URL 형식 | `https` 또는 `http` · userinfo 없음 · 호스트 있음 · 길이 ≤ 2048 · IDN 은 punycode 로 · 호스트 끝 점(`place.naver.com.`)은 떼고 본다 · ASCII 가 아닌 경로 · 질의는 퍼센트 인코딩(이미 인코딩한 `%XX` 는 그대로) | `rejected(BAD_URL)` |
 | 2 도메인 정책 | `deny` 에 걸리면 끝 · `allow` 가 있으면 그 안이어야 함 | `rejected(DOMAIN_DENIED)` · `rejected(DOMAIN_NOT_ALLOWED)` |
 | 3 SSRF | §7 — 주소 해석 후 사설 · 루프백 · 링크로컬 · 멀티캐스트 · 예약 대역이면 끝 | `rejected(SSRF_BLOCKED)` |
 | 4 robots | 호스트별 `robots.txt` 1회 받아 캐시(`urllib.robotparser`). 요청 UA 는 `limits.user_agent`, 판정은 `*` 규칙. `Crawl-delay` 가 있으면 간격에 반영 | 금지 → `unverifiable(ROBOTS_DISALLOW)` |
 | 5 받기 | GET · 리다이렉트 ≤ 3(매번 1~3 재검사) · 시간 ≤ `fetch_timeout_sec` · 바이트 ≤ `max_bytes_per_page`(초과 시 끊는다) · 쿠키 · 인증 없음 · JS 실행 없음 | 403 · 429 → `unverifiable(HTTP_BLOCKED)` · 5xx · 연결 실패 · 시간 초과 → `unverifiable(FETCH_FAILED)` · 404 · 410 → `rejected(NOT_FOUND_PAGE)` · 크기 초과 → `unverifiable(TOO_LARGE)` |
 | 6 본문 추출 | `Content-Type` 이 `text/html` · `application/xhtml+xml` · `text/plain` · `application/json` 만. HTML 은 `html.parser` 로 `script` · `style` · `noscript` 제거 후 텍스트 + `title` + `meta[name=description]` + JSON-LD(`application/ld+json`) 의 `address` 계열 값 | 다른 종류 → `unverifiable(UNSUPPORTED_CONTENT)` |
 | 7 정규화 | §6.1 | — |
-| 8 대조 | §6.2 규칙 — 필드마다 다르다 | 못 찾음 → `rejected(VALUE_NOT_ON_PAGE)` · 주소가 시도 · 구뿐 → `rejected(ADDRESS_TOO_VAGUE)` · 값 · 폐업 낱말 가까이에 대상 이름이 없음 → `rejected(NAME_NOT_NEAR_VALUE)` |
+| 8 대조 | §6.2 규칙 — 필드마다 다르다 | 못 찾음 → `rejected(VALUE_NOT_ON_PAGE)` · 주소가 시도 · 구뿐 → `rejected(ADDRESS_TOO_VAGUE)` · 값 · 폐업 낱말 가까이에 대상 이름이 없음 → `rejected(NAME_NOT_NEAR_VALUE)` · 이름이 문장부호를 빼고 2자 미만 → `rejected(NAME_TOO_SHORT)` · 공식 URL 인데 지시서가 적은 도메인이 아님 → `unverifiable(NEEDS_HUMAN_REVIEW)` |
 | 9 모순 | 같은 대상 · 필드의 받아들인 값이 둘 이상이고 다르다 | `unverifiable(CONFLICT)` |
 
 ### 6.1 정규화 — 양쪽(주장 값 · 페이지 본문)에 똑같이 적용
 
 - 유니코드 NFKC → 제로폭 문자(`​` `‌` `‍` `﻿`) 제거 → 공백 묶음을 한 칸으로 → 라틴 문자 소문자
-- 주소 전용 추가 규칙(`address` 필드만) — 「서울특별시」↔「서울시」↔「서울」, 「부산광역시」↔「부산」 등 시도 약칭 표를 양쪽에 적용 · 괄호 `( … )` 안은 떼어 **별도 토큰**으로 둔다 · 「번길」「로」「길」 뒤의 공백 제거 · 하이픈 종류(`-` `‐` `–`)를 `-` 로
+- 본문 문자셋 — 응답 머리글 `charset` → 본문 앞 2KB 의 `<meta charset>` · `http-equiv` → utf-8 → cp949 순서. `euc-kr` 은 상위 집합인 cp949 로 읽는다
+- 주소 전용 추가 규칙(`address` 필드만) — 「서울특별시」↔「서울시」↔「서울」, 「부산광역시」↔「부산」 등 시도 약칭 표를 양쪽에 적용(**뒤에 한글이 이어지지 않는 낱말일 때만** — 「제주도로」 「경기도로」 같은 도로명은 두지 않는다) · 괄호 `( … )` 안은 떼어 **별도 토큰**으로 둔다 · 「번길」「로」「길」 뒤의 공백 제거 · 하이픈 종류(`-` `‐` `–`)를 `-` 로
 - URL 전용(`official_url`) — 스킴 소문자 · 호스트 소문자 · 기본 포트 제거 · 끝 `/` 제거 · `utm_*` · `fbclid` 질의 제거 · 프래그먼트 제거
 
 ### 6.2 대조 규칙
 
 | 필드 | 규칙 A(정확) | 규칙 B(토큰) | 받아들임 |
 |---|---|---|---|
-| `address` | 값에 도로명 + 건물번호 또는 동 · 리 + 지번이 있어야 한다(없으면 `ADDRESS_TOO_VAGUE`). 정규화한 값이 정규화한 본문의 **부분 문자열**이고, 값이 숫자로 끝나면 본문의 바로 뒤가 숫자가 아니어야 한다(「회나무로4」는 「회나무로 49」에 맞지 않는다). **맞은 자리 앞뒤 400자 안에 `known.name` 이 있어야 한다** — 공백 · 문장부호를 빼고 대소문자 없이 비교(「구스테이크 528」 = 「구스테이크528」). 없으면 `NAME_NOT_NEAR_VALUE` | 값의 토큰(공백 단위 · 괄호 토큰 포함)이 **전부** 본문의 **연속 200자 창** 안에 순서대로 있음 | A 또는 B. 증거에 `match_rule: "exact"|"tokens"` 를 남긴다 |
-| `official_url` | `value` 를 받았을 때 2xx · 본문에 정규화한 `known.name` 이 부분 문자열로 있음 · 호스트가 `deny` 아님 · 포털 · 지도 · 블로그 · SNS 호스트 아님(`blog.naver.com` · `instagram.com` · `facebook.com` · `tistory.com` 등 고정 목록) | 없음 | A 만 |
-| `status` | 본문에 `폐업` · `영업 종료` · `영구 폐점` · `closed permanently` 중 하나가 **`known.name` 앞뒤 400자 안에** 있다 → `closed` 로만 받는다 | 없음 | 「영업 중」은 **받아들이지 않는다** — 페이지가 살아 있다는 것이 영업의 증거가 아니다. §13 |
+| `address` | 값에 도로명 + 건물번호 또는 동 · 리 + 지번이 있어야 한다(없으면 `ADDRESS_TOO_VAGUE`). 정규화한 값이 정규화한 본문의 **부분 문자열**이고, 값이 숫자로 끝나면 본문의 바로 뒤가 숫자 · 「-숫자」가 아니어야 한다(「회나무로4」는 「회나무로 49」에, 「회나무로 49」는 「회나무로 49-1」에, 「이태원동 211」은 「211-33」에 맞지 않는다). **맞은 자리 앞뒤 400자 안에 `known.name` 이 있어야 한다** — 공백 · 문장부호를 빼고 대소문자 없이 비교(「구스테이크 528」 = 「구스테이크528」). 끝의 괄호 지점명을 뗀 이름(「울프강 스테이크하우스(청담점)」 → 「울프강 스테이크하우스」)으로도 찾는다. 없으면 `NAME_NOT_NEAR_VALUE` | 값의 토큰(공백 단위 · 괄호 토큰 포함)이 **전부** 본문에 순서대로 있고, **토큰 사이에는 공백 · 문장부호만** 있다(글자 · 숫자가 끼면 안 된다) · 연속 200자 창 안 | A 또는 B. 증거에 `match_rule: "exact"|"tokens"` 를 남긴다 |
+| `official_url` | `value` 를 받았을 때 2xx · 본문에 정규화한 `known.name` 이 부분 문자열로 있음 · 호스트가 `deny` 아님 · 포털 · 지도 · 블로그 · SNS 호스트 아님(`blog.naver.com` · `instagram.com` · `facebook.com` · `tistory.com` 등 고정 목록) · **호스트가 그 대상의 `known.official_domain`(또는 하위 도메인)** | 없음 | A 만. 앞의 조건을 다 지나도 `official_domain` 이 없거나 다르면 `unverifiable(NEEDS_HUMAN_REVIEW)` — 블랙리스트에 없다는 것은 공식이라는 증거가 아니다. 후보 값은 사람이 보도록 그 행에 남긴다 |
+| `status` | 본문에 `폐업` · `영업 종료` · `영구 폐점` · `closed permanently` 중 하나가 **`known.name` 앞뒤 400자 안에** 있고, **폐업했다는 말이어야 한다** — 낱말 뒤 문장 끝(최대 12자)까지에 숫자(「영업 종료 22:00」 마감 시각) · 부정(아니 · 아님 · 않) · 단추 · 질문 꼴(신고 · 제보 · 문의 · 여부 · `?`)이 있거나, 앞에 `not` · `no` · `never` 가 있으면 세지 않는다 → `closed` 로만 받는다 | 없음 | 「영업 중」은 **받아들이지 않는다** — 페이지가 살아 있다는 것이 영업의 증거가 아니다. §13 |
 
-- 규칙 B 를 둔 이유 — 페이지가 「서울특별시 용산구 독서당로 122-1 A동 지하2층」처럼 쉼표 · 줄바꿈을 달리 넣는 일이 잦다. 토큰 전부 + 200자 창이면 다른 주소와 섞이는 경우를 막는다
+- 규칙 B 를 둔 이유 — 페이지가 쉼표 · 가운뎃점 · 줄바꿈을 달리 넣는 일이 잦다. 처음에는 「토큰 전부 + 200자 창」이었으나 2차 리뷰(2026-11-09)에서 **두 가게의 주소를 꿰매는** 것이 드러났다(「강남점 서울 강남구 테헤란로 10 / 마포점 서울 마포구 독막로 1」에서 「서울 강남구 독막로 1」 수락). 그래서 토큰 사이에 글자 · 숫자가 끼면 맞지 않는 것으로 좁혔다 — 「… 122-1 A동 지하2층」 을 「122-1 지하2층」 으로 줄인 값은 이제 거부된다(틀린 값보다 놓친 값이 낫다)
 - 이름 근접을 늘 요구하는 이유 — 식신 매거진처럼 한 페이지에 식당 다섯 곳이 실리면 haiku 가 옆 식당 주소를 붙일 수 있다. JSON-LD 는 같은 객체의 `name` 을 주소 앞에 붙여 이 규칙이 그대로 돈다
-- 모순 판정(9단계)의 열쇠는 (시도 약칭, 도로명 + 건물번호)다. 시도는 **두 값 모두에 적혀 있을 때만** 비교한다 — 한쪽에 없으면 도로명 + 번호만 본다(「서울 중구 중앙로 10」 ↔ 「부산 중구 중앙로 10」은 모순, 「중구 중앙로 10 2층」과는 같은 곳)
+- 모순 판정(9단계)의 열쇠는 (시도 약칭, 시 · 군 · 구, 도로명 + 건물번호)다. 시도는 **두 값 모두에 적혀 있을 때만** 비교한다 — 한쪽에 없으면 도로명 + 번호만 본다(「서울 중구 중앙로 10」 ↔ 「부산 중구 중앙로 10」은 모순, 「중구 중앙로 10 2층」과는 같은 곳). 시 · 군 · 구도 양쪽에 적혀 있고 **겹치는 것이 하나도 없으면** 모순이다(「강남구 중앙로 10」 ↔ 「종로구 중앙로 10」 · 「성남시 분당구 …」 ↔ 「분당구 …」 는 같은 곳)
+- 번호 바로 뒤가 「가」 낱말이면 도로명이 아니라 동 이름이다 — 「을지로3가 10」 은 지번으로 보고, 「을지로3가」 만 있으면 `ADDRESS_TOO_VAGUE`
+- `official_url` 모순은 §6.1 URL 정규화로 비교한다(끝 `/` · 호스트 대소문자만 다르면 같은 값)
+- **알려진 한계** — 이름 근접은 글자 거리(400자)만 본다. 「구스테이크528 리뷰 … 다른집 서울 마포구 독막로 1」 처럼 대상 이름 바로 뒤에 지시서에 없는 다른 가게의 주소가 오면 막지 못한다(2차 리뷰 codex). 같은 DOM 블록 · JSON-LD 객체로 묶는 일은 아직 하지 않았다 — 식신 매거진처럼 이름(`h3`)과 주소(`p`)가 다른 블록에 있는 페이지가 주 대상이라 블록 단위로 좁히면 맞는 값을 잃는다
 - **알려진 한계** — 지번만 있는 값(「이태원동 211-33」)은 모순 비교에서 빠지고, 같은 대상에 도로명 값이 있으면 고르지 않는다. 지번 값이 도로명 값과 다른 곳을 가리켜도 모순으로 잡지 못한다(지번 ↔ 도로명 변환 표가 없다)
 - 받아들인 값은 **페이지 본문에서 잘라낸 원문**이 아니라 Collector 의 `value` 를 정규화 전 형태로 쓴다 — 다만 규칙 B 로 받았으면 증거에 창(window) 원문을 함께 남긴다
 
@@ -271,7 +278,7 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 |---|---|---|
 | `accepted` | 출처를 다시 받아 값이 실제로 있었다 | `accepted.csv` |
 | `rejected` | 주장이 틀렸거나 정책 위반 — 재시도해도 같다 | `rejected.jsonl` |
-| `unverifiable` | 지금은 확인할 수 없다 — 차단 · robots · 크기 · 모순. **값이 맞을 수도 있지만 받아들이지 않는다** | `unverifiable.jsonl` |
+| `unverifiable` | 지금은 확인할 수 없다 — 차단 · robots · 크기 · 모순 · 공식 여부(`NEEDS_HUMAN_REVIEW`) · 한 URL 처리 중 뜻밖의 오류(`INTERNAL_ERROR` — 실행은 이어가고 산출물을 쓴다). **값이 맞을 수도 있지만 받아들이지 않는다** | `unverifiable.jsonl` |
 
 ## 7. 보안
 
@@ -284,9 +291,9 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 - 허용 스킴 `http` · `https` 뿐. `file:` · `ftp:` · `data:` · `gopher:` 거부
 - 호스트를 `getaddrinfo` 로 **먼저** 풀고 모든 주소가 공인 대역이어야 한다 — 거부 대역: `127/8` · `10/8` · `172.16/12` · `192.168/16` · `169.254/16` · `100.64/10`(Tailscale 포함) · `0/8` · `::1` · `fc00::/7` · `fe80::/10` · `ff00::/8` · `::ffff:0:0/96` · NAT64 `64:ff9b::/96` · 6to4 `2002::/16` 안에 든 IPv4 가 위 대역
 - **연결은 푼 주소로 고정**한다(`http.client.HTTPSConnection(ip, …)` + `server_hostname=host` 로 SNI · 인증서 검증 유지). 풀기와 연결 사이 DNS 재바인딩 창을 없앤다. 리다이렉트마다 같은 절차
-- `robots.txt` 도 **같은 경로**로 받는다(SSRF · 크기 · 시간 제한 동일). robots 응답 규칙 — 2xx 파싱 · 404 · 410 → 허용 · 401 · 403 → 전체 금지로 본다 · 5xx · 연결 실패 → **금지로 본다**(`unverifiable(ROBOTS_UNAVAILABLE)`) · 3xx → 같은 검사 경로로 3번까지 따라간다(넘거나 https → http 면 `ROBOTS_UNAVAILABLE`)
+- `robots.txt` 도 **같은 경로**로 받는다(SSRF · 크기 · 시간 제한 동일). robots 응답 규칙 — 2xx 파싱 · 404 · 410 → 허용 · 401 · 403 → 전체 금지로 본다 · 5xx · 연결 실패 → **금지로 본다**(`unverifiable(ROBOTS_UNAVAILABLE)`) · 3xx → 같은 검사 경로로 3번까지 따라간다(넘거나 https → http 면 `ROBOTS_UNAVAILABLE`) · 512 KiB 에서 잘린 robots 는 뒤쪽 `Disallow` 를 놓치므로 `ROBOTS_UNAVAILABLE`
 - 응답 크기는 스트리밍으로 세어 `max_bytes_per_page` 에서 끊는다. `Content-Length` 를 믿지 않는다
-- 시간 제한은 전체 마감이다 — 응답 머리 · 매 읽기 전에 남은 시간을 소켓 제한으로 건다(한 바이트씩 흘리는 서버도 `fetch_timeout_sec` 안에 끊는다)
+- 시간 제한은 전체 마감이다 — TLS 악수 · 요청 쓰기 · 응답 머리 · 매 읽기 전에 남은 시간을 소켓 제한으로 건다(한 바이트씩 흘리는 서버도 `fetch_timeout_sec` 안에 끊는다). 주소 풀기(`getaddrinfo`)는 시간 제한이 없어 데몬 스레드에서 돌리고 `RESOLVE_TIMEOUT_SEC`(10초)에서 끊는다 — 이 시간은 `fetch_timeout_sec` 밖이다
 - 리다이렉트가 https → http 로 내려가면 받지 않는다 — `unverifiable(REDIRECT_DOWNGRADE)`
 - 요청 헤더는 UA(`limits.user_agent`) · `Accept` · `Accept-Language: ko` 만. 쿠키 · 인증 · 리퍼러 없음
 - 받기는 Director 의 `urllib`/`http.client` 코드다. Builder 명령의 `curl` · `wget` 금지(`core/safety.py:72-78` `FORBIDDEN_COMMAND_PATTERNS`)와 어긋나지 않는다 — 웹에 닿는 것은 Director 뿐
@@ -294,12 +301,13 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 - 빈 임시 폴더 검사는 cwd 만 본다. 그 밖에 쓰지 못하는 근거는 도구 집합이다 — URL 찾기는 `--restricted` + `WebSearch` 하나뿐, 값 뽑기는 도구가 없다(`--tools ""`)
 
 **출력 한도**
-- 주장 수 ≤ `targets × fields × 3`. 넘치면 뒤를 버리고 `summary.json` 에 적는다
-- `claims_raw.json` 은 원문 그대로 두되 10 MiB 까지만 저장
+- 주장 수 ≤ 페이지 하나에 (그 페이지의 대상 × 필드 × 3). 넘치면 뒤를 버리고 버린 수를 `summary.json` 의 `claims_dropped` 에 적는다
+- `claims_raw.json` 은 원문 그대로 두되 10 MiB 까지만 저장 — **호출 단위로** 앞에서부터 담아 늘 올바른 JSON 이다(글자 단위로 자르지 않는다)
+- 실행 전체 받은 바이트는 `limits.max_total_bytes` 로 묶는다. 모델 호출 하나의 stdout · stderr 는 `ProcessTreeRunner` 가 끝까지 모은 뒤 20만 자로 자른다 — 읽는 중에 끊지는 않는다(알려진 한계)
 
 ## 8. 산출물과 증거 파일
 
-`<out>/<order_id>/` 아래. `order_id` 는 점으로 시작할 수 없고(`.` · `..` 거부), 코드가 결과 폴더가 `<out>` 안인지 다시 확인한다. 1단계는 `output.path` 에 쓰지 않는다 — 결과는 늘 `<out>/<order_id>/accepted.csv` 이고, `output.path` 는 2단계가 worktree 에 놓을 자리다(§10)
+`<out>/<order_id>/` 아래. `order_id` 는 점으로 시작할 수 없고(`.` · `..` 거부), 코드가 결과 폴더가 `<out>` 안인지 다시 확인한다. 파일은 심볼릭 링크를 따라가지 않고 쓴다(`O_NOFOLLOW`) — 결과 폴더 · `evidence` 폴더나 그 안 파일이 링크면 쓰지 않고 내부 오류(종료값 3)로 끝낸다. 1단계는 `output.path` 에 쓰지 않는다 — 결과는 늘 `<out>/<order_id>/accepted.csv` 이고, `output.path` 는 2단계가 worktree 에 놓을 자리다(§10)
 
 | 파일 | 내용 |
 |---|---|
@@ -314,7 +322,7 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 | `evidence/fetch_log.jsonl` | 요청마다 — URL · 최종 URL · 푼 IP · 상태 · 바이트 · `sha256` · robots 판정 · 간격 대기 초 · 시각(KST) |
 | `evidence/pages/<sha256>.txt` | 추출한 본문(정규화 **전**) — 대조 재현용 |
 | `evidence/robots/<host>.txt` | 받은 robots.txt |
-| `summary.json` | 대상 수 · 주장 수 · accepted/rejected/unverifiable 수 · 사유 코드별 수 · 요청 수 · 호스트별 요청 수 · 공급자 · 실패 · 소요 |
+| `summary.json` | 대상 수 · 주장 수 · 버린 주장 수(`claims_dropped`) · accepted/rejected/unverifiable 수 · 사유 코드별 수 · 요청 수 · 호스트별 요청 수 · 공급자 · 실패(`status` = `OK` · `PARTIAL` · `PROVIDER_FAILURE`) · 소요 |
 
 - 시각은 전부 `datetime.now(ZoneInfo("Asia/Seoul")).isoformat()` — `+09:00` 이 붙는다
 - 원문 HTML 은 저장하지 않는다(크기 · 저작물). 추출 텍스트와 `sha256` 만
@@ -325,7 +333,7 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 |---|---|
 | `name` | `known.name` |
 | `address` | accepted 인 `address` 값. 없으면 빈칸이고 그 행은 `official_url` 이 accepted 일 때만 나간다 |
-| `region` | 주소 첫 토큰의 시도 약칭(「서울특별시」→「서울」). 주소가 없으면 `known.sido` |
+| `region` | 주소 첫 토큰이 시도면 그 약칭(「서울특별시」→「서울」). 주소가 없거나 첫 토큰이 시도가 아니면(「강남구 …」) `known.sido` |
 | `category` | `known.category`. 없으면 `steakhouse` |
 | `source_name` | 받은 페이지의 `<title>`(≤ 80자) + 호스트 — 「울프강 스테이크하우스 서울 (wolfgangssteakhouse.co.kr)」 |
 | `source_url` | accepted 주장의 최종 URL(리다이렉트 뒤) |
@@ -345,9 +353,12 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 | 페이지에서 값을 못 뽑음 | 추출 결과에 그 대상 · 필드가 없음 | 다른 URL 에서도 없으면 `unverifiable(NOT_EXTRACTED)` |
 | `max_llm_calls` 소진 | 호출 수 | 남은 대상은 `summary.json` 의 `not_attempted` |
 | `max_fetch_requests` 소진 | 요청 수 | 남은 URL 은 `unverifiable(BUDGET_EXHAUSTED)` |
+| `max_total_bytes` 소진 | 받은 바이트 합 | 남은 URL 은 `unverifiable(BYTES_EXHAUSTED)` |
 | LLM 이 한 번도 성공하지 못함(호출이 있었는데) | — | 종료값 2 · `status: "PROVIDER_FAILURE"`. **accepted 가 0 이어도 호출이 성공했으면 종료값 0** |
+| 앞에서 성공한 뒤 한도 · 인증 등으로 공급자가 멈춤 | `provider_fatal` 이 있다 | 종료값 2 · `status: "PARTIAL"` — 남은 대상은 `not_attempted`. `report_health_db` 면 실패로 적는다 |
 
-종료값 — `0` 정상 · `1` 지시서 거부(스키마 · 정책) · `2` 공급자 실패 · `3` 내부 오류
+종료값 — `0` 정상 · `1` 지시서 거부(스키마 · 정책) · `2` 공급자 실패(`PROVIDER_FAILURE` · `PARTIAL`) · `3` 내부 오류
+- 모델 인자(`collector_model_args()` — Sonnet 이면 예외)는 실행 첫머리에서 본다. 웹에 한 번도 닿지 않고 종료값 3 으로 끝난다
 
 ## 10. 2단계 — Director 에 꽂는 자리(세 역할은 그대로)
 

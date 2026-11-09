@@ -38,7 +38,8 @@ def test_cli_out_dir_containment(tmp_path, monkeypatch):
         object.__setattr__(o, "order_id", "..")
         return o
     monkeypatch.setattr(cli, "load_order", fake_load)
-    o = {"version": 1, "order_id": "ok", "purpose": "p", "targets": [{"id": "a", "fields": ["address"], "urls": []}],
+    o = {"version": 1, "order_id": "ok", "purpose": "p",
+         "targets": [{"id": "a", "known": {"name": "구스테이크528"}, "fields": ["address"], "urls": []}],
          "output": {"schema": "steak-sources-v1", "path": "x.csv"}, "requested_at_kst": "2026-11-09T15:00:00+09:00"}
     p = tmp_path / "o.json"
     p.write_text(json.dumps(o), encoding="utf-8")
@@ -109,8 +110,9 @@ def test_robots_redirect_followed():
 
 
 def test_robots_redirect_to_private_blocked():
-    f = mk({"https://example.com/robots.txt": (302, {"Location": "http://evil.test/robots.txt"}, b"")})
-    assert f.fetch("https://example.com/a").reason_code in ("SSRF_BLOCKED", "ROBOTS_UNAVAILABLE")
+    # https → https 로 보내야 내림 검사보다 SSRF 검사가 먼저 돈다(2차 리뷰 13)
+    f = mk({"https://example.com/robots.txt": (302, {"Location": "https://evil.test/robots.txt"}, b"")})
+    assert f.fetch("https://example.com/a").reason_code == "SSRF_BLOCKED"
 
 
 def test_robots_redirect_loop_unavailable():

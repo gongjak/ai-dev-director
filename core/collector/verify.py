@@ -20,6 +20,9 @@ NON_OFFICIAL_HOSTS = ("blog.naver.com", "m.blog.naver.com", "cafe.naver.com", "m
                       "instagram.com", "facebook.com", "tistory.com", "youtube.com", "twitter.com", "x.com",
                       "map.kakao.com", "place.map.kakao.com", "siksinhot.com", "mangoplate.com", "diningcode.com")
 CLOSED_WORDS = ("폐업", "영업 종료", "영업종료", "영구 폐점", "영구폐점", "closed permanently", "permanently closed")
+# 폐업 낱말이 있어도 폐업했다는 말이 아닌 꼴 — 「영업 종료 22:00」(마감 시각) · 「[폐업 신고]」(단추) · 「폐업 아닙니다」(부정)
+_CLOSED_NOT_AFTER = re.compile(r"^[\s:]*\d|아니|아닙|아닌|아님|않|신고|제보|문의|여부|\?")
+_CLOSED_NOT_BEFORE = re.compile(r"\b(?:not|never|no)\s+$")
 # 시도 약칭 — 긴 이름부터 바꾼다
 _SIDO = [("서울특별시", "서울"), ("서울시", "서울"), ("부산광역시", "부산"), ("대구광역시", "대구"), ("인천광역시", "인천"),
          ("광주광역시", "광주"), ("대전광역시", "대전"), ("울산광역시", "울산"), ("세종특별자치시", "세종"),
@@ -108,9 +111,32 @@ def _ld_addresses(raw: str) -> List[str]:
     return [x for x in out if x.strip()]
 
 
-def _charset(content_type: str) -> str:
+_META_CHARSET = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_-]+)""", re.I)
+_KO_LEGACY = {"euc-kr", "euckr", "ks-c-5601-1987", "ks_c_5601-1987", "ksc5601", "windows-949", "x-windows-949", "cp949"}
+
+
+def _decode(body: bytes, content_type: str) -> str:
+    """머리글 charset → 본문 앞 2KB 의 meta charset → utf-8 → cp949 순서. euc-kr 은 상위 집합 cp949 로 읽는다.
+    선언이 없으면 utf-8 · cp949 를 엄격하게 시도하고, 둘 다 안 되면 utf-8(대체 문자) — 깨진 바이트 하나로 페이지 전체를
+    cp949 로 읽지 않는다."""
     m = re.search(r"charset=([\w-]+)", content_type or "", re.I)
-    return m.group(1) if m else "utf-8"
+    cs = m.group(1) if m else None
+    if not cs:
+        mm = _META_CHARSET.search(body[:2048])
+        cs = mm.group(1).decode("ascii") if mm else None
+    if cs and cs.lower() in _KO_LEGACY:
+        cs = "cp949"
+    if cs:
+        try:
+            return body.decode(cs, errors="replace")
+        except LookupError:
+            pass
+    for enc in ("utf-8", "cp949"):
+        try:
+            return body.decode(enc)
+        except UnicodeDecodeError:
+            pass
+    return body.decode("utf-8", errors="replace")
 
 
 def extract_text(body: bytes, content_type: str) -> Optional[PageText]:
@@ -118,10 +144,7 @@ def extract_text(body: bytes, content_type: str) -> Optional[PageText]:
     ctype = (content_type or "").split(";")[0].strip().lower()
     if ctype not in _TEXT_TYPES:
         return None
-    try:
-        decoded = body.decode(_charset(content_type), errors="replace")
-    except LookupError:
-        decoded = body.decode("utf-8", errors="replace")
+    decoded = _decode(body, content_type)
     if ctype in ("text/plain", "application/json"):
         return PageText(text=decoded)
     ex = _Extractor()
@@ -148,7 +171,8 @@ def normalize_address(text: str) -> str:
     t = normalize(text)
     t = re.sub(r"[‐‑‒–—−]", "-", t)
     for long, short in _SIDO:
-        t = t.replace(long, short)
+        # 시도 낱말 하나일 때만 — 「제주도로」 「경기도로」 같은 도로명 안의 글자는 두지 않는다
+        t = re.sub(re.escape(long) + r"(?![가-힣])", short, t)
     t = re.sub(r"[(),]", " ", t)                        # 괄호 안은 별도 토큰 · 쉼표는 구분자
     t = re.sub(r"(번길|로|길)\s+(?=\d)", r"\1", t)      # 「압구정로 108」 → 「압구정로108」
     return re.sub(r"\s+", " ", t).strip()
@@ -170,17 +194,22 @@ _JIBUN = re.compile(r"[가-힣0-9]+(?:동|리|가)\s*\d+(?:-\d+)?")
 
 
 def _find_bounded(body: str, tok: str, start: int) -> int:
-    """tok 를 start 부터 찾되, tok 가 숫자로 끝나면 바로 뒤가 숫자인 자리(「회나무로4」↔「회나무로49」)는 건너뛴다.
-    숫자로 시작하면 바로 앞이 숫자인 자리도 건너뛴다."""
+    """tok 를 start 부터 찾되, tok 가 숫자로 끝나면 바로 뒤가 숫자 · 「-숫자」인 자리(「회나무로4」↔「회나무로49」 ·
+    「회나무로49」↔「회나무로49-1」)는 건너뛴다. 숫자로 시작하면 바로 앞이 숫자 · 「숫자-」인 자리도 건너뛴다."""
     pos = body.find(tok, start)
     while pos != -1:
         end = pos + len(tok)
-        after_ok = not (tok[-1].isdigit() and end < len(body) and body[end].isdigit())
-        before_ok = not (tok[0].isdigit() and pos > 0 and body[pos - 1].isdigit())
+        after_ok = not (tok[-1].isdigit() and end < len(body) and (
+            body[end].isdigit() or (body[end] == "-" and end + 1 < len(body) and body[end + 1].isdigit())))
+        before_ok = not (tok[0].isdigit() and pos > 0 and (
+            body[pos - 1].isdigit() or (body[pos - 1] == "-" and pos > 1 and body[pos - 2].isdigit())))
         if after_ok and before_ok:
             return pos
         pos = body.find(tok, pos + 1)
     return -1
+
+
+_GAP_OK = re.compile(r"[\W_]*")
 
 
 def match_address_spans(value: str, page: str) -> List[Tuple[str, int, int]]:
@@ -201,7 +230,8 @@ def match_address_spans(value: str, page: str) -> List[Tuple[str, int, int]]:
         pos, ok = start + len(tokens[0]), True
         for tok in tokens[1:]:
             nxt = _find_bounded(body, tok, pos)
-            if nxt == -1 or nxt + len(tok) - start > WINDOW:
+            # 토큰 사이에는 공백 · 문장부호만 — 글자 · 숫자가 끼면 다른 주소를 꿰맨 것일 수 있다
+            if nxt == -1 or nxt + len(tok) - start > WINDOW or not _GAP_OK.fullmatch(body[pos:nxt]):
                 ok = False
                 break
             pos = nxt + len(tok)
@@ -225,19 +255,23 @@ def _compact(text: str) -> str:
     return re.sub(r"[\W_]+", "", normalize(text))
 
 
-def _name_pattern(name: str) -> Optional["re.Pattern"]:
-    c = _compact(name)
-    if not c:
-        return None
-    return re.compile(r"[\W_]*".join(re.escape(ch) for ch in c))
+MIN_NAME_CHARS = 2
+
+
+def _name_patterns(name: str) -> List["re.Pattern"]:
+    """이름 전체와, 끝의 괄호(「(청담점)」)를 뗀 이름. 문장부호를 뺀 길이가 MIN_NAME_CHARS 미만이면 쓰지 않는다."""
+    out = []
+    for cand in dict.fromkeys([name or "", re.sub(r"\s*[(（\[].*?[)）\]]\s*$", "", name or "")]):
+        c = _compact(cand)
+        if len(c) >= MIN_NAME_CHARS:
+            out.append(re.compile(r"[\W_]*".join(re.escape(ch) for ch in c)))
+    return out
 
 
 def name_near(name: str, body: str, start: int, end: int, window: int = NAME_WINDOW) -> bool:
     """body(이미 정규화한 본문)의 [start, end) 앞뒤 window 자 안에 이름이 있는가."""
-    pat = _name_pattern(name)
-    if pat is None:
-        return False
-    return pat.search(body[max(0, start - window):end + window]) is not None
+    near = body[max(0, start - window):end + window]
+    return any(p.search(near) for p in _name_patterns(name))
 
 
 def address_specific(value: str) -> bool:
@@ -249,7 +283,10 @@ def _host_in(host: str, hosts) -> bool:
     return any(host == h or host.endswith("." + h) for h in hosts)
 
 
-def check_official_url(value: str, final_url: str, known_name: str, page: str, domains: Domains) -> Optional[str]:
+def check_official_url(value: str, final_url: str, known_name: str, page: str, domains: Domains,
+                       official_domain: str = "") -> Optional[str]:
+    """None 이면 받는다. 「NEEDS_HUMAN_REVIEW」 는 거부가 아니라 검증 불가 — 블랙리스트에 없다는 것은 공식이라는 증거가 아니다.
+    지시서가 그 대상의 known.official_domain 으로 적은 호스트(또는 하위 도메인)일 때만 받는다."""
     parsed = check_url_format(value)
     if not parsed:
         return "BAD_URL"
@@ -261,6 +298,9 @@ def check_official_url(value: str, final_url: str, known_name: str, page: str, d
         return "NOT_OFFICIAL_HOST"
     if not known_name or normalize(known_name) not in normalize(page):
         return "NAME_NOT_ON_PAGE"
+    od = (official_domain or "").strip().lower().rstrip(".")
+    if not od or not _host_in(parsed[1], (od,)):
+        return "NEEDS_HUMAN_REVIEW"
     return None
 
 
@@ -269,9 +309,18 @@ def _origin(url: str) -> str:
     return urlunsplit((p.scheme, p.netloc, "", "", ""))
 
 
+FIELDS_NEED_NAME = ("address", "official_url", "status")
+
+
+def _closed_affirmative(body: str, a: int, b: int) -> bool:
+    """폐업 낱말 뒤 문장 끝(최대 12자)까지에 시각 · 부정 · 신고 단추 꼴이 없고, 앞에 not 이 없어야 폐업했다는 말이다."""
+    after = re.split(r"[.!\n\]]", body[b:b + 12])[0]
+    return not _CLOSED_NOT_AFTER.search(after) and not _CLOSED_NOT_BEFORE.search(body[max(0, a - 8):a])
+
+
 @dataclass
 class Verdict:
-    outcome: str                 # accepted · rejected
+    outcome: str                 # accepted · rejected · unverifiable
     reason_code: Optional[str] = None
     match_rule: Optional[str] = None
     window: str = ""
@@ -279,13 +328,15 @@ class Verdict:
 
 
 def verify_claim(field_name: str, value, final_url: str, known_name: str, page: PageText,
-                 domains: Domains) -> Verdict:
+                 domains: Domains, official_domain: str = "") -> Verdict:
     if value is None or (isinstance(value, str) and not value.strip()):
         return Verdict("rejected", "NO_VALUE")
     if not isinstance(value, str) or len(value) > 500 or re.search(r"[\x00-\x1f\x7f]", value):
         return Verdict("rejected", "BAD_VALUE")
     if field_name == "address" and not has_hangul(value):   # 한국어 주소만 받는다 — 영문 표기는 대조 · 병합 기준이 다르다
         return Verdict("rejected", "NOT_KOREAN_ADDRESS")
+    if field_name in FIELDS_NEED_NAME and len(_compact(known_name or "")) < MIN_NAME_CHARS:
+        return Verdict("rejected", "NAME_TOO_SHORT")       # 한 글자 이름은 어디에나 있다
     text = page.full()
     if field_name == "address":
         if not address_specific(value):
@@ -301,7 +352,9 @@ def verify_claim(field_name: str, value, final_url: str, known_name: str, page: 
         rule, a, b = near[0]
         return Verdict("accepted", match_rule=rule, window=body[a:b], value=value.strip())
     if field_name == "official_url":
-        reason = check_official_url(value, final_url, known_name, text, domains)
+        reason = check_official_url(value, final_url, known_name, text, domains, official_domain)
+        if reason == "NEEDS_HUMAN_REVIEW":
+            return Verdict("unverifiable", reason, value=value.strip())
         if reason:
             return Verdict("rejected", reason)
         return Verdict("accepted", match_rule="exact", value=value.strip())
@@ -309,7 +362,8 @@ def verify_claim(field_name: str, value, final_url: str, known_name: str, page: 
         body = normalize(text)
         if normalize(value) != "closed":
             return Verdict("rejected", "STATUS_NOT_CLOSED")    # 「영업 중」은 받지 않는다
-        hits = [(m.start(), m.end()) for w in CLOSED_WORDS for m in re.finditer(re.escape(normalize(w)), body)]
+        hits = [(m.start(), m.end()) for w in CLOSED_WORDS for m in re.finditer(re.escape(normalize(w)), body)
+                if _closed_affirmative(body, m.start(), m.end())]
         if not hits:
             return Verdict("rejected", "VALUE_NOT_ON_PAGE")
         if not any(name_near(known_name, body, a, b) for a, b in hits):   # 남의 가게 폐업 문구를 막는다
@@ -318,7 +372,8 @@ def verify_claim(field_name: str, value, final_url: str, known_name: str, page: 
     return Verdict("rejected", "UNKNOWN_FIELD")
 
 
-_ROAD_KEY = re.compile(r"([가-힣0-9]+(?:번길|로|길))(\d+(?:-\d+)?)(?!\d)")
+# 번호 뒤가 「가」 낱말이면 도로명이 아니라 동 이름이다(「을지로3가」 · 「종로1가」)
+_ROAD_KEY = re.compile(r"([가-힣0-9]+(?:번길|로|길))(\d+(?:-\d+)?)(?!\d)(?!가(?![가-힣]))")
 _SIDO_SHORT = {short for _, short in _SIDO}
 
 
@@ -334,6 +389,11 @@ def sido_of(value: str) -> Optional[str]:
     return first if first in _SIDO_SHORT else None
 
 
+def districts_of(value: str) -> set:
+    """시 · 군 · 구 낱말들(「성남시」 「분당구」). 시도 약칭은 빼고 본다."""
+    return {t for t in normalize_address(value).split(" ") if re.fullmatch(r"[가-힣]+(?:시|군|구)", t)}
+
+
 def has_hangul(value: str) -> bool:
     return bool(re.search(r"[가-힣]", value or ""))
 
@@ -342,9 +402,12 @@ def conflict_keys(accepted: List[dict]) -> set:
     """같은 대상 · 필드에 받아들인 값이 서로 다른 곳을 가리키면 그 (target_id, field).
     주소는 도로명 + 건물번호 열쇠로 비교한다 — 「회나무로 49」와 「회나무로 49 1층」은 같은 곳이다.
     열쇠가 없는 값(지번만 있는 주소)은 비교에서 뺀다. 열쇠가 하나도 없으면 정규화한 값 전체로 비교한다.
-    시도는 양쪽 다 적혀 있을 때만 비교한다 — 한쪽에 없으면 도로명 + 번호만 본다."""
+    시도는 양쪽 다 적혀 있을 때만 비교한다 — 한쪽에 없으면 도로명 + 번호만 본다.
+    시 · 군 · 구도 양쪽에 적혀 있고 겹치는 것이 하나도 없으면 다른 곳이다(강남구 중앙로 10 ↔ 종로구 중앙로 10).
+    official_url 은 normalize_url 로 비교한다(끝 「/」 · 호스트 대소문자)."""
     seen: Dict[tuple, set] = {}
     sidos: Dict[tuple, set] = {}
+    dists: Dict[tuple, list] = {}
     for c in accepted:
         k = (c["target_id"], c["field"])
         if c["field"] == "address":
@@ -352,6 +415,10 @@ def conflict_keys(accepted: List[dict]) -> set:
             norm = rk or ("raw:" + normalize_address(c["value"]))
             if rk and sido_of(c["value"]):
                 sidos.setdefault(k, set()).add(sido_of(c["value"]))
+            if rk and districts_of(c["value"]):
+                dists.setdefault(k, []).append(districts_of(c["value"]))
+        elif c["field"] == "official_url":
+            norm = normalize_url(c["value"])
         else:
             norm = normalize(c["value"])
         seen.setdefault(k, set()).add(norm)
@@ -361,5 +428,7 @@ def conflict_keys(accepted: List[dict]) -> set:
         if len(keyed if keyed else vals) > 1:
             out.add(k)
         elif len(sidos.get(k, ())) > 1:          # 같은 도로명 · 번호라도 시도가 다르면 다른 곳(서울 중구 ↔ 부산 중구)
+            out.add(k)
+        elif any(not (a & b) for i, a in enumerate(dists.get(k, [])) for b in dists[k][i + 1:]):
             out.add(k)
     return out

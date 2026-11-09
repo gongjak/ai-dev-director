@@ -36,7 +36,7 @@ class _Strict(BaseModel):
 
 class Target(_Strict):
     id: str = Field(pattern=r"^[A-Za-z0-9._-]{1,64}$")
-    known: Dict[str, str] = Field(default_factory=dict)
+    known: Dict[str, str] = Field(default_factory=dict, validate_default=True)
     fields: List[Literal["address", "official_url", "status"]] = Field(min_length=1)
     query_hint: Optional[str] = None
     urls: List[str] = Field(default_factory=list)
@@ -44,7 +44,10 @@ class Target(_Strict):
     @field_validator("known")
     @classmethod
     def _known(cls, v):
-        return {_clean(k, 40): _clean(val) for k, val in v.items()}
+        out = {_clean(k, 40): _clean(val) for k, val in v.items()}
+        if not (out.get("name") or "").strip():
+            raise ValueError("known.name 이 비었다 — 이름 근접 대조(§6.2)에 쓴다")
+        return out
 
     @field_validator("query_hint")
     @classmethod
@@ -73,6 +76,7 @@ class Limits(_Strict):
     min_interval_sec_per_host: float = Field(3, ge=1)
     llm_timeout_sec: float = Field(300, gt=0, le=1800)
     max_page_chars: int = Field(60000, ge=1000, le=200000)
+    max_total_bytes: int = Field(128 * 1024 * 1024, ge=1024 * 1024, le=1024 * 1024 * 1024)   # 실행 전체 받은 바이트
     user_agent: str = DEFAULT_USER_AGENT
 
     @field_validator("user_agent")
@@ -169,7 +173,7 @@ def load_order(path) -> CollectOrder:
 def domain_rule_match(rule: str, host: str, path: str) -> bool:
     """규칙은 `host` 또는 `host/pathprefix`. 호스트는 같거나 하위 도메인이면 맞는다."""
     rhost, _, rpath = rule.strip().partition("/")
-    rhost, host = rhost.lower(), host.lower()
+    rhost, host = rhost.lower().rstrip("."), host.lower().rstrip(".")   # 「place.naver.com.」 도 같은 호스트다
     if not (host == rhost or host.endswith("." + rhost)):
         return False
     return not rpath or path.startswith("/" + rpath)

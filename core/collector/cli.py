@@ -1,6 +1,6 @@
 """python -m core.collector.cli <order.json> --out <dir>  (설계 §2 · §9)
 
-종료값 — 0 정상(accepted 0 건 포함) · 1 지시서 거부 · 2 공급자 실패 · 3 내부 오류
+종료값 — 0 정상(accepted 0 건 포함) · 1 지시서 거부 · 2 공급자 실패(중간 fatal 로 남은 일을 버린 PARTIAL 포함) · 3 내부 오류
 """
 import argparse
 import hashlib
@@ -16,6 +16,7 @@ from core.collector.netfetch import Fetcher, precheck, strip_fragment
 from core.collector.order import OrderError, load_order
 from core.collector.providers import CallFailed, HaikuCollector, LlmBudgetExhausted, ProviderFatal, report_health
 from core.collector.verify import conflict_keys, extract_text, road_key, verify_claim
+from core.env_utils import collector_model_args
 
 
 def _rec(target_id: str, field: str, source_url: Optional[str], reason: str, **extra) -> dict:
@@ -26,6 +27,7 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
                 provider: Optional[HaikuCollector] = None) -> tuple:
     """(exit_code, summary). 지시서 거부는 OrderError 로 올린다."""
     started = time.monotonic()
+    collector_model_args()                    # Sonnet 설정이면 웹에 닿기 전에 멈춘다
     order = load_order(order_path)
     base = Path(out_dir) / order.order_id
     out_root = Path(out_dir).resolve()
@@ -43,6 +45,7 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
     pages: Dict[str, str] = {}
     titles: Dict[str, str] = {}
     truncated_pages = 0
+    claims_dropped = 0
     tried: Dict[tuple, bool] = {}            # (target_id, field) → 페이지를 하나라도 읽었는가
 
     # ① URL 찾기 — 주어진 urls 가 있으면 그대로
@@ -80,64 +83,76 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
         if provider.fatal or provider.calls_made >= lim.max_llm_calls:
             not_attempted.extend(t.id for t in targets if t.id not in not_attempted)
             continue
-        res = fetcher.fetch(url)
-        if not res.ok:
-            bucket = rejected if res.outcome == "rejected" else unverifiable
-            for t in targets:
-                for f in t.fields:
-                    bucket.append(_rec(t.id, f, url, res.reason_code, http_status=res.status))
-            continue
-        page = extract_text(res.body, res.content_type)
-        if page is None:
-            for t in targets:
-                for f in t.fields:
-                    unverifiable.append(_rec(t.id, f, res.final_url, "UNSUPPORTED_CONTENT",
-                                             content_type=res.content_type))
-            continue
-        full = page.full()
-        sha = hashlib.sha256(full.encode("utf-8")).hexdigest()
-        pages[sha] = full
-        titles[res.final_url] = page.title
-        if len(full) > lim.max_page_chars:
-            truncated_pages += 1
         try:
-            raw_claims = provider.extract_claims(targets, full[:lim.max_page_chars])
-        except (ProviderFatal, LlmBudgetExhausted):
-            not_attempted.extend(t.id for t in targets if t.id not in not_attempted)
-            continue
-        except CallFailed as exc:
+            res = fetcher.fetch(url)
+            if not res.ok:
+                bucket = rejected if res.outcome == "rejected" else unverifiable
+                for t in targets:
+                    for f in t.fields:
+                        bucket.append(_rec(t.id, f, url, res.reason_code, http_status=res.status))
+                continue
+            page = extract_text(res.body, res.content_type)
+            if page is None:
+                for t in targets:
+                    for f in t.fields:
+                        unverifiable.append(_rec(t.id, f, res.final_url, "UNSUPPORTED_CONTENT",
+                                                 content_type=res.content_type))
+                continue
+            full = page.full()
+            sha = hashlib.sha256(full.encode("utf-8")).hexdigest()
+            pages[sha] = full
+            titles[res.final_url] = page.title
+            if len(full) > lim.max_page_chars:
+                truncated_pages += 1
+            try:
+                raw_claims = provider.extract_claims(targets, full[:lim.max_page_chars])
+            except (ProviderFatal, LlmBudgetExhausted):
+                not_attempted.extend(t.id for t in targets if t.id not in not_attempted)
+                continue
+            except CallFailed as exc:
+                for t in targets:
+                    for f in t.fields:
+                        unverifiable.append(_rec(t.id, f, res.final_url, "EXTRACT_FAILED", detail=str(exc)))
+                continue
+            by_id = {t.id: t for t in targets}
             for t in targets:
                 for f in t.fields:
-                    unverifiable.append(_rec(t.id, f, res.final_url, "EXTRACT_FAILED", detail=str(exc)))
-            continue
-        by_id = {t.id: t for t in targets}
-        for t in targets:
-            for f in t.fields:
-                tried[(t.id, f)] = True
-        limit = len(targets) * 3 * 3
-        for c in raw_claims[:limit]:
-            tid, f = str(c.get("target_id", "")), str(c.get("field", ""))
-            claim = {"target_id": tid, "field": f, "value": c.get("value"), "quote": str(c.get("quote", ""))[:300],
-                     "source_url": res.final_url, "page_sha256": sha, "provider": "claude-haiku",
-                     "call_no": provider.calls_made, "received_at_kst": outputs.now_iso()}
-            claims.append(claim)
-            t = by_id.get(tid)
-            if t is None:
-                rejected.append({**claim, "reason_code": "UNKNOWN_TARGET"})
-                continue
-            if f not in t.fields:
-                rejected.append({**claim, "reason_code": "FIELD_NOT_REQUESTED"})
-                continue
-            v = verify_claim(f, c.get("value"), res.final_url, t.known.get("name", ""), page, order.domains)
-            row = {**claim, "reason_code": v.reason_code, "match_rule": v.match_rule}
-            if v.outcome == "accepted":
-                row["value"] = v.value
-                if v.match_rule == "tokens":
-                    row["window"] = v.window
-                claims[-1]["verdict"] = "accepted"
-                claims[-1]["_row"] = row
-            else:
-                rejected.append(row)
+                    tried[(t.id, f)] = True
+            limit = sum(len(t.fields) for t in targets) * 3      # 대상 × 필드 × 3 (설계 §7)
+            claims_dropped += max(0, len(raw_claims) - limit)
+            for c in raw_claims[:limit]:
+                tid, f = str(c.get("target_id", "")), str(c.get("field", ""))
+                claim = {"target_id": tid, "field": f, "value": c.get("value"), "quote": str(c.get("quote", ""))[:300],
+                         "source_url": res.final_url, "page_sha256": sha, "provider": "claude-haiku",
+                         "call_no": provider.calls_made, "received_at_kst": outputs.now_iso()}
+                claims.append(claim)
+                t = by_id.get(tid)
+                if t is None:
+                    rejected.append({**claim, "reason_code": "UNKNOWN_TARGET"})
+                    continue
+                if f not in t.fields:
+                    rejected.append({**claim, "reason_code": "FIELD_NOT_REQUESTED"})
+                    continue
+                v = verify_claim(f, c.get("value"), res.final_url, t.known.get("name", ""), page, order.domains,
+                                 official_domain=t.known.get("official_domain", ""))
+                row = {**claim, "reason_code": v.reason_code, "match_rule": v.match_rule}
+                if v.outcome == "accepted":
+                    row["value"] = v.value
+                    if v.match_rule == "tokens":
+                        row["window"] = v.window
+                    claims[-1]["verdict"] = "accepted"
+                    claims[-1]["_row"] = row
+                elif v.outcome == "unverifiable":           # 공식 URL 후보 — 사람이 본다
+                    unverifiable.append({**row, "value": v.value})
+                else:
+                    rejected.append(row)
+        except AssertionError:            # 시험의 네트워크 차단(conftest) 은 삼키지 않는다
+            raise
+        except Exception as exc:          # 한 URL 의 뜻밖의 오류로 실행 전체 · 산출물을 잃지 않는다
+            for t in targets:
+                for f in t.fields:
+                    unverifiable.append(_rec(t.id, f, url, "INTERNAL_ERROR",
+                                             detail=f"{type(exc).__name__}: {exc}"[:300]))
 
     # ⑨ 모순 · 중복 정리
     acc_rows = [c.pop("_row") for c in claims if "_row" in c]
@@ -161,15 +176,18 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
     header, rows = outputs.build_rows(order.output.schema_name, order.targets, accepted, titles,
                                       outputs.now_kst().date().isoformat())
     failed = provider.calls_made > 0 and provider.successes == 0
+    # 앞에서 성공했어도 중간에 한도 · 인증 오류로 멈췄으면 남은 일을 버린 것이다 — 정상(0)으로 끝내지 않는다
+    partial = bool(provider.fatal) and not failed
     if order.providers.report_health_db and provider.calls_made:
-        report_health(provider.successes > 0, provider.stderr_tail)
+        report_health(provider.successes > 0 and not provider.fatal, provider.stderr_tail)
     hosts: Dict[str, int] = {}
     for e in fetcher.log:
         h = e["url"].split("/")[2] if "://" in e["url"] else e["url"]
         hosts[h] = hosts.get(h, 0) + 1
     summary = {
-        "order_id": order.order_id, "status": "PROVIDER_FAILURE" if failed else "OK",
-        "targets": len(order.targets), "claims": len(claims), "accepted": len(accepted), "rows": len(rows),
+        "order_id": order.order_id, "status": "PROVIDER_FAILURE" if failed else ("PARTIAL" if partial else "OK"),
+        "targets": len(order.targets), "claims": len(claims), "claims_dropped": claims_dropped,
+        "accepted": len(accepted), "rows": len(rows),
         "rejected": len(rejected), "unverifiable": len(unverifiable),
         "reason_codes": outputs.reason_counts(rejected, unverifiable),
         "fetch_requests": fetcher.requests_made, "requests_per_host": hosts,
@@ -181,7 +199,7 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
                       rejected=rejected, unverifiable=unverifiable, claims=claims, raw=provider.raw_log,
                       llm_calls=provider.calls_log, fetch_log=fetcher.log, pages=pages, robots=fetcher.robots_texts,
                       summary=summary)
-    return (2 if failed else 0), summary
+    return (2 if failed or partial else 0), summary
 
 
 def main(argv=None) -> int:

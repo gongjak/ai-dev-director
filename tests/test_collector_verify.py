@@ -59,7 +59,10 @@ def test_unsupported_content():
 
 
 def test_official_url_rules():
-    assert v("official_url", "https://example.com/a").outcome == "accepted"
+    # 블랙리스트에 없다는 것은 공식이라는 증거가 아니다 — 지시서가 적은 도메인일 때만 받는다(2차 리뷰 12)
+    assert v("official_url", "https://example.com/a").reason_code == "NEEDS_HUMAN_REVIEW"
+    assert verify_claim("official_url", "https://example.com/a", "https://example.com/a", "구스테이크528", PAGE, D,
+                        official_domain="example.com").outcome == "accepted"
     assert v("official_url", "https://blog.naver.com/x", url="https://blog.naver.com/x").reason_code == "NOT_OFFICIAL_HOST"
     assert v("official_url", "https://example.com/a", name="다른식당").reason_code == "NAME_NOT_ON_PAGE"
     assert v("official_url", "https://other.com/").reason_code == "URL_NOT_SOURCE"

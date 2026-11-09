@@ -9,18 +9,21 @@ import http.client
 import ipaddress
 import socket
 import ssl
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
 from core.collector.order import Domains, Limits, domain_rule_match
 
 MAX_REDIRECTS = 3
+RESOLVE_TIMEOUT_SEC = 10.0          # getaddrinfo 는 시간 제한이 없다 — 스레드로 묶는다
 
 # 이 결과 코드는 「주장이 틀렸다」가 아니라 「정책 위반」이라 rejected, 나머지 실패는 unverifiable 이다.
-ROBOTS_POLICY_CODES = ("BAD_URL", "DOMAIN_DENIED", "DOMAIN_NOT_ALLOWED", "SSRF_BLOCKED", "BUDGET_EXHAUSTED")
+ROBOTS_POLICY_CODES = ("BAD_URL", "DOMAIN_DENIED", "DOMAIN_NOT_ALLOWED", "SSRF_BLOCKED", "BUDGET_EXHAUSTED",
+                       "BYTES_EXHAUSTED")
 REJECT_CODES = {"BAD_URL", "DOMAIN_DENIED", "DOMAIN_NOT_ALLOWED", "SSRF_BLOCKED", "NOT_FOUND_PAGE"}
 
 
@@ -63,20 +66,24 @@ class StdlibTransport:
     def request(self, *, scheme: str, host: str, port: int, ip: str, path: str, headers: Dict[str, str],
                 timeout: float, max_bytes: int) -> RawResponse:
         deadline = time.monotonic() + timeout
+        sock = None
+
+        def arm():
+            # 남은 시간을 소켓 제한으로 건다 — TLS · 요청 쓰기 · 한 바이트씩 흘려 보내는 서버가 마감을 넘기지 못하게
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                raise TransportError("timeout")
+            sock.settimeout(remain)
+            return remain
         try:
             sock = socket.create_connection((ip, port), timeout=timeout)
             if scheme == "https":
+                arm()
                 sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
             conn = http.client.HTTPConnection(host, port, timeout=timeout)
             conn.sock = sock
+            arm()
             conn.request("GET", path, headers=headers)
-
-            def arm():
-                # 남은 시간을 소켓 제한으로 건다 — 한 바이트씩 흘려 보내는 서버가 마감을 넘기지 못하게
-                remain = deadline - time.monotonic()
-                if remain <= 0:
-                    raise TransportError("timeout")
-                sock.settimeout(remain)
             arm()
             resp = conn.getresponse()
             chunks, size, truncated = [], 0, False
@@ -93,13 +100,30 @@ class StdlibTransport:
             hdrs = {k.lower(): v for k, v in resp.getheaders()}
             conn.close()
             return RawResponse(resp.status, hdrs, b"".join(chunks), truncated)
-        except (OSError, http.client.HTTPException) as exc:
+        except (OSError, http.client.HTTPException, ValueError) as exc:   # UnicodeError · InvalidURL 도 ValueError
+            if sock is not None:
+                sock.close()
             raise TransportError(f"{type(exc).__name__}: {exc}") from exc
 
 
 def _stdlib_resolver(host: str, port: int) -> List[str]:
-    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    return sorted({info[4][0] for info in infos})
+    """getaddrinfo 를 데몬 스레드에서 돌려 RESOLVE_TIMEOUT_SEC 에서 끊는다(멈춘 해석기가 실행을 붙잡지 못하게)."""
+    box: dict = {}
+
+    def work():
+        try:
+            box["infos"] = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except Exception as exc:          # 스레드 밖으로 그대로 넘긴다
+            box["exc"] = exc
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    th.join(RESOLVE_TIMEOUT_SEC)
+    if th.is_alive():
+        raise OSError(f"DNS 시간 초과 {host}")
+    if "exc" in box:
+        exc = box["exc"]
+        raise exc if isinstance(exc, OSError) else OSError(str(exc))
+    return sorted({info[4][0] for info in box["infos"]})
 
 
 # conftest 가 시험 중에 이 둘을 「부르면 예외」로 바꾼다. Fetcher 는 생성 시점에 이 이름을 읽는다.
@@ -133,11 +157,16 @@ def check_url_format(url: str) -> Optional[Tuple[str, str, int, str]]:
     if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
         return None
     try:
-        host = parts.hostname.encode("idna").decode("ascii").lower()
+        host = parts.hostname.encode("idna").decode("ascii").lower().rstrip(".")   # 끝 점은 같은 호스트다
     except UnicodeError:
         return None
+    if not host:
+        return None
     port = port or (443 if parts.scheme == "https" else 80)
-    path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    # ASCII 가 아닌 경로 · 질의는 퍼센트 인코딩 — 이미 인코딩한 「%XX」 는 그대로 둔다
+    path = quote(parts.path or "/", safe="/%:@!$&'()*+,;=-._~")
+    if parts.query:
+        path += "?" + quote(parts.query, safe="/%:@!$&'()*+,;=?-._~")
     return parts.scheme, host, port, path
 
 
@@ -169,6 +198,7 @@ class Fetcher:
     log: List[dict] = field(default_factory=list)
     robots_texts: Dict[str, str] = field(default_factory=dict)
     requests_made: int = 0
+    bytes_total: int = 0
     _robots: Dict[str, Optional[RobotFileParser]] = field(default_factory=dict)
     _robots_reason: Dict[str, Optional[str]] = field(default_factory=dict)
     _last_at: Dict[str, float] = field(default_factory=dict)
@@ -197,6 +227,8 @@ class Fetcher:
             return None, ",".join(ips or []), "SSRF_BLOCKED"
         if self.requests_made >= self.limits.max_fetch_requests:
             return None, ips[0], "BUDGET_EXHAUSTED"
+        if self.bytes_total >= self.limits.max_total_bytes:      # 실행 전체 메모리 · 증거 크기 상한
+            return None, ips[0], "BYTES_EXHAUSTED"
         waited = self._wait(host)
         self.requests_made += 1
         headers = {"Host": host if port in (80, 443) else f"{host}:{port}", "User-Agent": self.limits.user_agent,
@@ -212,6 +244,7 @@ class Fetcher:
             return None, ips[0], "FETCH_FAILED"
         finally:
             self._last_at[host] = self.clock()
+        self.bytes_total += len(raw.body)
         entry.update(status=raw.status, bytes=len(raw.body), truncated=raw.truncated,
                      sha256=hashlib.sha256(raw.body).hexdigest())
         self.log.append(entry)
@@ -256,6 +289,8 @@ class Fetcher:
                 reason = "ROBOTS_DISALLOW"
             elif raw.status in (404, 410) or not (200 <= raw.status < 300):
                 reason = None   # 없으면 허용
+            elif raw.truncated:
+                reason = "ROBOTS_UNAVAILABLE"   # 잘린 robots 는 뒤쪽 Disallow 를 놓친다 — 금지로 본다
             else:
                 text = raw.body.decode("utf-8", errors="replace")
                 self.robots_texts[host] = text
