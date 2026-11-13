@@ -440,14 +440,22 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 
 ### 13.1 3차 리뷰 (2026-11-14 · 대상 `3fab4f2..035ea80`)
 
-agy Argon high 는 한도 소진(429 · 9시간 뒤 초기화)으로 받지 못해 **fable 서브에이전트 리뷰로 대신했다.** 지적 4건을 원본에 대어 봤다 — 고칠 것 없음.
+agy Argon high 는 한도 소진(429)으로 받지 못해 **fable 서브에이전트 리뷰로 대신했다. Argon 리뷰는 아직 받지 못했다.**
+처음 이 절에 「지적 4건 · 모두 해당 없음」이라 적은 기록(`742177e`)은 **틀렸다** — 실제 지적은 10건이고, 원본에 대어 재현하니 10건 모두 맞았다.
+고친 커밋은 모두 `9fd6a9f`, 시험은 `tests/test_collector_review3.py` 다(전체 819 통과).
 
-| 지적 | 판정 | 근거 |
-|---|---|---|
-| 리디렉트 뒤 호스트 재검사 | 해당 없음 | 리뷰어 스스로 문제 없음으로 닫았다 |
-| 빈 주소 토큰이 아무 페이지나 수락 | 해당 없음 | `match_address_spans` 가 정규화 뒤 빈 값이면 `[]`(`verify.py:217-218`) · `address_specific` 관문도 있다. 지적한 함수 `_addr_tokens_match` 는 없다 |
-| CSV 수식 주입 방어가 탭 · CR 을 빠뜨림 | 해당 없음 | 그런 방어 코드가 애초에 없다(전제가 틀렸다). `accepted.csv` 는 git diff · REVIEWER 가 읽고 스프레드시트로 열지 않는다(§8 · §10). `source_name` 에 페이지 제목이 들어가므로 스프레드시트로 열게 되면 그때 막는다 |
-| 위 빈 토큰 지적의 시험 누락 | 해당 없음 | 결함이 없다 |
+| # | 지적 | 판정 | 고친 것 · 시험 |
+|---|---|---|---|
+| 1 | 폐업 판정이 「영업 종료 시간 22:00」 · 「오후 10시」 · 「폐업 안 했습니다」 · 「소문은 사실이 아닙니다」 · 「폐업설은 사실무근」 · 「isn't permanently closed」를 폐업으로 받는다 | CONFIRMED | `_CLOSED_HOURS` · 부정 꼴 · `n't` · 뒤 30자 · `test_closed_negation_and_hours_rejected` |
+| 2 | `normalize()` 가 줄바꿈을 지워 「폐업\n02-…」 · 「폐업 2024.03.31」 · 「영업 종료: 2024-03-31」 · 「폐업\n1층 상가 임대」를 놓친다(회귀) | CONFIRMED | 폐업 판정에 `normalize_lines` · 날짜 점은 문장 끝이 아니다 · `test_closed_with_date_or_newline_accepted` |
+| 3 | 경로 규칙을 퍼센트 인코딩 뒤 경로와 견주어 한글 deny 가 안 막히고 allow 가 막힌다 | CONFIRMED | `domain_rule_match` 가 양쪽을 `unquote` · `test_path_rule_non_ascii_deny_and_allow` |
+| 4 | 「압구정로 108」이 「108번길 5」에, 「압구정로 10」이 「10길 5」에, 「을지로 3」이 「3가 10」에 맞는다 | CONFIRMED | `_find_bounded` 가 숫자 뒤 「번길 · 길 · 가」를 거른다 · `test_building_number_not_prefix_of_other_road` |
+| 5 | `districts_of` 가 「대구」를 구로 세고, 「성남시 분당구 ↔ 성남시 수정구」를 겹침 하나로 같은 곳이라 본다 | CONFIRMED | 시도 약칭 제외 · 시 · 군 · 구 단위별 비교 · `test_conflict_*` |
+| 6 | URL 전부가 INTERNAL_ERROR 여도 종료값 0 · status OK | CONFIRMED | 일부면 PARTIAL · 전부면 INTERNAL_FAILURE(종료값 2) · `internal_errors` 칸 · `test_all_internal_error_is_not_ok` |
+| 7 | `<out>/<order_id>` 심볼릭 링크 검사가 끝(쓰기 직전)에만 있어 웹 · LLM 을 쓴 뒤 멈춘다 | CONFIRMED — out 밖을 가리키는 링크는 시작의 `resolve` 검사가 이미 막았고, **out 안을 가리키는 링크**가 끝까지 갔다 | 시작에서 `is_symlink` 검사 · `test_symlink_output_rejected_before_fetch` |
+| 8 | `outputs._SIDO_SHORT` 에 「제주도」 · 「세종시」가 없어 region 이 빈다 | CONFIRMED | 두 이름 추가 · `test_region_jeju_do_and_sejong_si` |
+| 9 | `_decode` 가 meta 의 unicode_escape · utf-16 을 믿고, 머리글 charset=idna 의 UnicodeError 를 못 잡는다 | CONFIRMED | 글자 인코딩 허용 목록 `_TEXT_CODECS` · `UnicodeError` 도 잡는다 · `test_decode_*` |
+| 10 | `official_domain` 「co.kr」이면 evil.co.kr 을 공식으로 받는다 | CONFIRMED | `is_public_suffix`(TLD · 2자 국가 TLD 아래 co · or · go 등 · `.kr` 지역 이름) → NEEDS_HUMAN_REVIEW · 의존성 추가 없음 · `test_public_suffix_*` |
 
 ## 14. 구현 순서
 
