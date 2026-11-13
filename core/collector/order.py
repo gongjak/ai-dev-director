@@ -1,4 +1,5 @@
 """수집 지시서(collect_order.json) 스키마 · 기본값 · 한도 · 도메인 정책 (설계 §3)."""
+from urllib.parse import unquote
 import json
 import re
 from pathlib import Path
@@ -176,4 +177,5 @@ def domain_rule_match(rule: str, host: str, path: str) -> bool:
     rhost, host = rhost.lower().rstrip("."), host.lower().rstrip(".")   # 「place.naver.com.」 도 같은 호스트다
     if not (host == rhost or host.endswith("." + rhost)):
         return False
-    return not rpath or path.startswith("/" + rpath)
+    # 경로는 퍼센트 인코딩을 풀어 견준다 — 규칙 「example.com/카페」 와 요청 경로 「/%EC%B9%B4…」 는 같다
+    return not rpath or unquote(path).startswith("/" + unquote(rpath))

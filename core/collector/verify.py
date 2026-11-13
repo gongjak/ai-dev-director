@@ -1,4 +1,5 @@
 """본문 추출 · 정규화 · 대조 규칙 (설계 §6 6~9단계). LLM 이 없는 결정론 경로다."""
+import codecs
 import json
 import re
 import unicodedata
@@ -20,9 +21,12 @@ NON_OFFICIAL_HOSTS = ("blog.naver.com", "m.blog.naver.com", "cafe.naver.com", "m
                       "instagram.com", "facebook.com", "tistory.com", "youtube.com", "twitter.com", "x.com",
                       "map.kakao.com", "place.map.kakao.com", "siksinhot.com", "mangoplate.com", "diningcode.com")
 CLOSED_WORDS = ("폐업", "영업 종료", "영업종료", "영구 폐점", "영구폐점", "closed permanently", "permanently closed")
-# 폐업 낱말이 있어도 폐업했다는 말이 아닌 꼴 — 「영업 종료 22:00」(마감 시각) · 「[폐업 신고]」(단추) · 「폐업 아닙니다」(부정)
-_CLOSED_NOT_AFTER = re.compile(r"^[\s:]*\d|아니|아닙|아닌|아님|않|신고|제보|문의|여부|\?")
-_CLOSED_NOT_BEFORE = re.compile(r"\b(?:not|never|no)\s+$")
+# 폐업 낱말이 있어도 폐업했다는 말이 아닌 꼴 — 「영업 종료 (시간) (오후) 22:00 · 10시」(마감 시각) · 「[폐업 신고]」(단추) ·
+# 「폐업 아닙니다 · 안 했습니다 · 폐업설은 사실무근」(부정). 날짜(「폐업 2024.03.31」)는 시각이 아니다
+_CLOSED_HOURS = re.compile(r"^[\s:]*(?:시간|시각)?[\s:]*(?:오전|오후|am|pm)?\s*\d{1,2}\s*(?::\d{2}|시(?![가-힣]))")
+_CLOSED_NOT_AFTER = re.compile(r"아니|아닙|아닌|아님|않|안\s*(?:했|함|합|하|된|됐)|사실무근|소문|루머|^설|오보|"
+                               r"신고|제보|문의|여부|\?")
+_CLOSED_NOT_BEFORE = re.compile(r"(?:\b(?:not|never|no)|n['’]t)\s+$")
 # 시도 약칭 — 긴 이름부터 바꾼다
 _SIDO = [("서울특별시", "서울"), ("서울시", "서울"), ("부산광역시", "부산"), ("대구광역시", "대구"), ("인천광역시", "인천"),
          ("광주광역시", "광주"), ("대전광역시", "대전"), ("울산광역시", "울산"), ("세종특별자치시", "세종"),
@@ -112,6 +116,8 @@ def _ld_addresses(raw: str) -> List[str]:
 
 
 _META_CHARSET = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_-]+)""", re.I)
+_TEXT_CODECS = {"utf-8", "cp949", "euc_kr", "ascii", "latin-1", "iso8859-1", "cp1252", "iso8859-15", "shift_jis",
+                "cp932", "euc_jp", "iso2022_jp", "gb2312", "gbk", "gb18030", "big5", "big5hkscs"}
 _KO_LEGACY = {"euc-kr", "euckr", "ks-c-5601-1987", "ks_c_5601-1987", "ksc5601", "windows-949", "x-windows-949", "cp949"}
 
 
@@ -126,10 +132,14 @@ def _decode(body: bytes, content_type: str) -> str:
         cs = mm.group(1).decode("ascii") if mm else None
     if cs and cs.lower() in _KO_LEGACY:
         cs = "cp949"
-    if cs:
+    try:
+        cs = codecs.lookup(cs).name if cs else None
+    except LookupError:
+        cs = None
+    if cs in _TEXT_CODECS:                 # unicode_escape · idna · utf-16(ASCII meta 와 모순) 같은 선언은 믿지 않는다
         try:
             return body.decode(cs, errors="replace")
-        except LookupError:
+        except (LookupError, UnicodeError):
             pass
     for enc in ("utf-8", "cp949"):
         try:
@@ -167,6 +177,11 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip().lower()
 
 
+def normalize_lines(text: str) -> str:
+    """normalize 와 같되 줄바꿈은 남긴다 — 폐업 판정에서 줄 끝이 문장 끝이다."""
+    return "\n".join(x for x in (normalize(line) for line in (text or "").splitlines()) if x)
+
+
 def normalize_address(text: str) -> str:
     t = normalize(text)
     t = re.sub(r"[‐‑‒–—−]", "-", t)
@@ -199,8 +214,10 @@ def _find_bounded(body: str, tok: str, start: int) -> int:
     pos = body.find(tok, start)
     while pos != -1:
         end = pos + len(tok)
+        # 「압구정로108」↔「압구정로108번길5」 · 「압구정로10」↔「압구정로10길5」 · 「을지로3」↔「을지로3가 10」도 다른 곳이다
         after_ok = not (tok[-1].isdigit() and end < len(body) and (
-            body[end].isdigit() or (body[end] == "-" and end + 1 < len(body) and body[end + 1].isdigit())))
+            body[end].isdigit() or (body[end] == "-" and end + 1 < len(body) and body[end + 1].isdigit())
+            or _ROAD_TAIL.match(body, end)))
         before_ok = not (tok[0].isdigit() and pos > 0 and (
             body[pos - 1].isdigit() or (body[pos - 1] == "-" and pos > 1 and body[pos - 2].isdigit())))
         if after_ok and before_ok:
@@ -210,6 +227,7 @@ def _find_bounded(body: str, tok: str, start: int) -> int:
 
 
 _GAP_OK = re.compile(r"[\W_]*")
+_ROAD_TAIL = re.compile(r"번길|길|가(?![가-힣])")
 
 
 def match_address_spans(value: str, page: str) -> List[Tuple[str, int, int]]:
@@ -299,9 +317,26 @@ def check_official_url(value: str, final_url: str, known_name: str, page: str, d
     if not known_name or normalize(known_name) not in normalize(page):
         return "NAME_NOT_ON_PAGE"
     od = (official_domain or "").strip().lower().rstrip(".")
-    if not od or not _host_in(parsed[1], (od,)):
+    if not od or is_public_suffix(od) or not _host_in(parsed[1], (od,)):
         return "NEEDS_HUMAN_REVIEW"
     return None
+
+
+# 공용 접미사 — 누구나 그 아래에 등록할 수 있어 「공식 도메인」이 될 수 없다(「co.kr」 이면 evil.co.kr 도 맞는다).
+# 새 의존성 없이 흔한 꼴만 막는다: 점 없는 이름(TLD) · 2자 국가 TLD 아래 2단계 등록 이름 · .kr 지역 이름
+_SLD = {"co", "or", "go", "ac", "ne", "re", "pe", "ms", "hs", "es", "sc", "kg", "mil", "com", "net", "org", "gov",
+        "edu", "ltd", "plc", "nhs", "gen", "biz", "info"}
+_KR_REGIONS = {"seoul", "busan", "daegu", "incheon", "gwangju", "daejeon", "ulsan", "sejong", "gyeonggi", "gangwon",
+               "chungbuk", "chungnam", "jeonbuk", "jeonnam", "gyeongbuk", "gyeongnam", "jeju"}
+
+
+def is_public_suffix(domain: str) -> bool:
+    labels = [x for x in domain.split(".") if x]
+    if len(labels) < 2:
+        return True
+    if len(labels) == 2 and len(labels[1]) == 2 and (labels[0] in _SLD or (labels[1] == "kr" and labels[0] in _KR_REGIONS)):
+        return True
+    return len(labels) == 3 and labels[2] == "kr" and labels[1] in _KR_REGIONS and labels[0] in _SLD
 
 
 def _origin(url: str) -> str:
@@ -313,9 +348,11 @@ FIELDS_NEED_NAME = ("address", "official_url", "status")
 
 
 def _closed_affirmative(body: str, a: int, b: int) -> bool:
-    """폐업 낱말 뒤 문장 끝(최대 12자)까지에 시각 · 부정 · 신고 단추 꼴이 없고, 앞에 not 이 없어야 폐업했다는 말이다."""
-    after = re.split(r"[.!\n\]]", body[b:b + 12])[0]
-    return not _CLOSED_NOT_AFTER.search(after) and not _CLOSED_NOT_BEFORE.search(body[max(0, a - 8):a])
+    """폐업 낱말 뒤 문장 끝(줄 끝 · 「. ! ]」 · 최대 30자)까지에 마감 시각 · 부정 · 신고 단추 꼴이 없고,
+    앞에 not · n't 가 없어야 폐업했다는 말이다. 날짜 안의 점(「2024.03.31」)은 문장 끝이 아니다."""
+    after = re.split(r"(?<!\d)[.!]|[.!](?!\d)|[\n\]]", body[b:b + 30])[0]
+    return not (_CLOSED_HOURS.search(after) or _CLOSED_NOT_AFTER.search(after)
+                or _CLOSED_NOT_BEFORE.search(body[max(0, a - 10):a]))
 
 
 @dataclass
@@ -359,7 +396,7 @@ def verify_claim(field_name: str, value, final_url: str, known_name: str, page: 
             return Verdict("rejected", reason)
         return Verdict("accepted", match_rule="exact", value=value.strip())
     if field_name == "status":
-        body = normalize(text)
+        body = normalize_lines(text)
         if normalize(value) != "closed":
             return Verdict("rejected", "STATUS_NOT_CLOSED")    # 「영업 중」은 받지 않는다
         hits = [(m.start(), m.end()) for w in CLOSED_WORDS for m in re.finditer(re.escape(normalize(w)), body)
@@ -390,8 +427,15 @@ def sido_of(value: str) -> Optional[str]:
 
 
 def districts_of(value: str) -> set:
-    """시 · 군 · 구 낱말들(「성남시」 「분당구」). 시도 약칭은 빼고 본다."""
-    return {t for t in normalize_address(value).split(" ") if re.fullmatch(r"[가-힣]+(?:시|군|구)", t)}
+    """시 · 군 · 구 낱말들(「성남시」 「분당구」). 시도 약칭(「대구」 · 「세종」)은 빼고 본다."""
+    return {t for t in normalize_address(value).split(" ")
+            if re.fullmatch(r"[가-힣]+(?:시|군|구)", t) and t not in _SIDO_SHORT}
+
+
+def _districts_disjoint(a: set, b: set) -> bool:
+    """시 · 군 · 구 단위마다 따로 본다 — 양쪽에 같은 단위가 있는데 겹치지 않으면 다른 곳(성남시 분당구 ↔ 성남시 수정구)."""
+    return any({x for x in a if x.endswith(u)} and {x for x in b if x.endswith(u)}
+               and not ({x for x in a if x.endswith(u)} & {x for x in b if x.endswith(u)}) for u in "시군구")
 
 
 def has_hangul(value: str) -> bool:
@@ -429,6 +473,6 @@ def conflict_keys(accepted: List[dict]) -> set:
             out.add(k)
         elif len(sidos.get(k, ())) > 1:          # 같은 도로명 · 번호라도 시도가 다르면 다른 곳(서울 중구 ↔ 부산 중구)
             out.add(k)
-        elif any(not (a & b) for i, a in enumerate(dists.get(k, [])) for b in dists[k][i + 1:]):
+        elif any(_districts_disjoint(a, b) for i, a in enumerate(dists.get(k, [])) for b in dists[k][i + 1:]):
             out.add(k)
     return out

@@ -33,6 +33,8 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
     out_root = Path(out_dir).resolve()
     if base.resolve() == out_root or out_root not in base.resolve().parents:   # out 바로 아래만 쓴다
         raise OrderError(f"ORDER_INVALID: order_id 가 out 폴더 밖을 가리킨다 ({order.order_id})")
+    if base.is_symlink():                     # 끝에서 막으면 웹 · LLM 을 이미 쓴 뒤다 — 닿기 전에 막는다
+        raise OrderError(f"ORDER_INVALID: 출력 폴더가 심볼릭 링크다 ({base})")
     lim = order.limits
     fetcher = fetcher or Fetcher(lim, order.domains, now_iso=outputs.now_iso)
     provider = provider or HaikuCollector(lim.llm_timeout_sec, lim.max_llm_calls, now_iso=outputs.now_iso)
@@ -45,6 +47,8 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
     pages: Dict[str, str] = {}
     titles: Dict[str, str] = {}
     truncated_pages = 0
+    internal_errors = 0                      # 뜻밖의 오류로 버린 URL 수
+    urls_tried = 0
     claims_dropped = 0
     tried: Dict[tuple, bool] = {}            # (target_id, field) → 페이지를 하나라도 읽었는가
 
@@ -83,6 +87,7 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
         if provider.fatal or provider.calls_made >= lim.max_llm_calls:
             not_attempted.extend(t.id for t in targets if t.id not in not_attempted)
             continue
+        urls_tried += 1
         try:
             res = fetcher.fetch(url)
             if not res.ok:
@@ -149,6 +154,7 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
         except AssertionError:            # 시험의 네트워크 차단(conftest) 은 삼키지 않는다
             raise
         except Exception as exc:          # 한 URL 의 뜻밖의 오류로 실행 전체 · 산출물을 잃지 않는다
+            internal_errors += 1
             for t in targets:
                 for f in t.fields:
                     unverifiable.append(_rec(t.id, f, url, "INTERNAL_ERROR",
@@ -177,7 +183,9 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
                                       outputs.now_kst().date().isoformat())
     failed = provider.calls_made > 0 and provider.successes == 0
     # 앞에서 성공했어도 중간에 한도 · 인증 오류로 멈췄으면 남은 일을 버린 것이다 — 정상(0)으로 끝내지 않는다
-    partial = bool(provider.fatal) and not failed
+    partial = (bool(provider.fatal) or internal_errors > 0) and not failed
+    # 읽으려던 URL 이 전부 뜻밖의 오류로 끝났으면 한 일이 없다 — 정상도 부분 성공도 아니다
+    internal_failure = internal_errors > 0 and internal_errors == urls_tried and not failed
     if order.providers.report_health_db and provider.calls_made:
         report_health(provider.successes > 0 and not provider.fatal, provider.stderr_tail)
     hosts: Dict[str, int] = {}
@@ -185,7 +193,9 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
         h = e["url"].split("/")[2] if "://" in e["url"] else e["url"]
         hosts[h] = hosts.get(h, 0) + 1
     summary = {
-        "order_id": order.order_id, "status": "PROVIDER_FAILURE" if failed else ("PARTIAL" if partial else "OK"),
+        "order_id": order.order_id, "status": "PROVIDER_FAILURE" if failed else (
+            "INTERNAL_FAILURE" if internal_failure else ("PARTIAL" if partial else "OK")),
+        "internal_errors": internal_errors,
         "targets": len(order.targets), "claims": len(claims), "claims_dropped": claims_dropped,
         "accepted": len(accepted), "rows": len(rows),
         "rejected": len(rejected), "unverifiable": len(unverifiable),
