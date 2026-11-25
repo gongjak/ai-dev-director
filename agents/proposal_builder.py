@@ -89,10 +89,12 @@ class ProposalBuilder(AntigravityBuilder):
         usage.set_context(role='BUILDER')
         self.last_execution_info = {'exit_code': None, 'attempts': [], 'output': ''}
         root = Path(worktree_path).resolve()
-        from core.builder_context import project_roots, referenced_documents, reference_roots
+        from core.builder_context import main_checkout, project_roots, referenced_documents, reference_roots
         from core.collector import stage as collect_stage
         # 포크: 프로젝트 자신을 가리키는 폴더 표기는 참조 스냅샷으로 다시 넘기지 않는다(이미 소스로 간다)
-        documents = referenced_documents(order, reference_roots(root), project_roots=project_roots(root))
+        # 포크: 주 작업본에만 있는 git 무시 데이터(작업 폴더에는 없다)는 reference_paths 로 가리키면 읽기 전용으로 싣는다
+        documents = referenced_documents(order, reference_roots(root), project_roots=project_roots(root),
+                                         main_root=main_checkout(root), worktree=root)
         sources = {}
         candidates = []
         for directory, dirs, names in os.walk(root, followlinks=False):

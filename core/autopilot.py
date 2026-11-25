@@ -330,6 +330,13 @@ def sanitize_order(order: OrderSchema, project_path: Optional[str]) -> Tuple[Ord
     # as source context, and a relative entry makes the Builder reject the whole ORDER.
     # 포크: '~/…' 는 홈으로 펴서 절대경로로 남긴다 — 펴지 않으면 상대경로로 보고 버린다
     expanded = [os.path.expanduser(str(p)) if str(p).startswith("~/") else p for p in data.get("reference_paths") or []]
+    # 포크: 저장소 상대경로라도 「주 작업본에만 있는 git 무시 데이터」면 절대경로로 남긴다(작업 폴더에는 없어 참조로만 닿는다)
+    from core.builder_context import ignored_main_path
+    resolved = [ignored_main_path(project_path, p) or p for p in expanded]
+    if resolved != expanded:
+        # 알림이 있어야 부르는 쪽(prepare_order_for_execution)이 고친 ORDER 를 받아 쓴다
+        notes.append("repo-relative reference_paths to gitignored main-checkout data made absolute")
+    expanded = resolved
     refs = [p for p in expanded if Path(str(p)).is_absolute()]
     if len(refs) != len(data.get("reference_paths") or []):
         notes.append("dropped repo-relative reference_paths (repo files are already supplied to the Builder)")

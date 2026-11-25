@@ -164,7 +164,7 @@ class CodexHead(BaseHead):
             "1. Output MUST be valid JSON adhering strictly to the schema.\n"
             "2. Define minimal 'allowed_paths' necessary to achieve the goal.\n"
             "3. Include critical files/directories in 'protected_paths' that must not be modified.\n"
-            "4. Define clear, testable 'acceptance_criteria'. Include required_outputs: exact project-relative deliverable file paths, including required behavior tests. Include reference_paths for explicit user-supplied absolute document paths.\n"
+            "4. Define clear, testable 'acceptance_criteria'. Include required_outputs: exact project-relative deliverable file paths, including required behavior tests. Include reference_paths for explicit user-supplied absolute document paths. If PROJECT CONTEXT has gitignored_data, those files exist only in the main checkout (not in the Builder's worktree); list the absolute path (main_checkout + '/' + path) of the ones the task needs in reference_paths.\n"
             "5. Specify realistic 'max_files_changed' (<=15) and 'max_diff_lines' (<=800).\n"
             "6. 'allowed_deletions': Must be empty [] unless the user explicitly requested deleting specific functions, classes, tests, or files.\n"
             "7. Explicitly remind the builder to preserve all existing functions, classes, and tests alongside new ones.\n\n"
@@ -257,7 +257,7 @@ class CodexHead(BaseHead):
             '  "message": "Your answer to the question"\n'
             "}\n\n"
             "If it's a DEV_TASK, output a strict ORDER JSON as well:\n"
-            "All allowed_paths must be narrow project-relative files/subtrees (e.g. src/**, tests/**, README.md). Never put the absolute project directory or a whole-project wildcard in allowed_paths. Include required_outputs listing exact deliverable file paths and reference_paths listing user-supplied absolute document paths.\n"
+            "All allowed_paths must be narrow project-relative files/subtrees (e.g. src/**, tests/**, README.md). Never put the absolute project directory or a whole-project wildcard in allowed_paths. Include required_outputs listing exact deliverable file paths and reference_paths listing user-supplied absolute document paths. If PROJECT CONTEXT has gitignored_data, those files exist only in the main checkout (not in the Builder's worktree); list the absolute path (main_checkout + '/' + path) of the ones the task needs in reference_paths.\n"
             "{\n"
             '  "type": "DEV_TASK",\n'
             '  "message": "I will proceed with this task.",\n'

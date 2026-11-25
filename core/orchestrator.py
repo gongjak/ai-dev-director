@@ -139,7 +139,15 @@ class Orchestrator:
             for fn in filenames:
                 rel = Path(root, fn).relative_to(proj).as_posix()
                 files.append(rel)
-        return {"project_path": str(proj), "existing_files": files[:100]}
+        context = {"project_path": str(proj)}
+        # 포크: 주 작업본에만 있는 git 무시 데이터(작업 폴더에는 없다)를 경로 · 크기로 알린다. existing_files 앞에 둔다 —
+        # plan_next 가 맥락을 12,000자에서 자른다
+        from core.builder_context import ignored_data_files
+        ignored = ignored_data_files(str(proj))
+        if ignored:
+            context["gitignored_data"] = ignored
+        context["existing_files"] = files[:100]
+        return context
 
     def _get_agent_domain(self, agent: Any) -> str:
         return ProviderManager.domain_for_provider(getattr(agent, "provider", ""))
