@@ -229,3 +229,39 @@ codex 가 HIGH 셋을 냈다. 지적마다 재현 명령을 먼저 돌리고, �
 - **실측(읽기 전용 · festival-map)** — 목록 11개(`web/public/data/2020~2026.json` · `meta.json` · `collector/raw/{mcst2025,mcst2026,std}/20261023.json`). 무시된 `CLAUDE.md` 는 데이터가 아니라 싣지 않는다. Director 자신에 대고 부르면 목록이 없다(None). `2026.json`(1,197,108바이트) · `mcst2026/20261023.json`(587,994바이트)은 앞 4,000자가 실린다. `web/node_modules` · `web/dist` · 다른 실행의 작업 폴더는 거부된다
 - **한계** — 그 프로젝트의 실제 데이터는 모두 100,000바이트를 넘어서 Builder 는 **꼴(키 · 값 예시)만** 본다. Builder 는 도구가 없어 나머지를 읽지 못하고, 작업 폴더에서 도는 시험도 그 경로를 열 수 없다(파일을 작업 폴더로 복사하지 않는다). 전체 데이터가 있어야 통과하는 시험은 여전히 만들 수 없다 — 꼴에 맞춘 작은 견본으로 시험하는 ORDER 여야 한다. 목록은 파일 내용을 읽지 않으므로 내용이 비밀인 파일의 **이름**은 HEAD 에 간다(내용은 Builder 가 읽을 때 거부한다). 이름에 `key` 가 든 데이터 파일(`keywords.json`)은 비밀 이름 규칙에 걸려 거부된다 — 닫힌 쪽으로 두었다
 - **시험** — `tests/test_fork_ignored_main_data.py` 34건(실제 git 저장소 + worktree 를 임시 폴더에 만든다 · 빌더 프롬프트는 가짜 실행기로 잡는다). 전체 **1158 통과 · 0 실패 · 3 제외**(337초 · 마지막 코드 수정 뒤 실행 · 고치기 전 1124 통과 → +34). 옛 시험의 기대값은 바꾸지 않았다. 새 시험을 구현 전에 실패로 돌려 보지는 않았다(미션이 이 저장소에서 돌고 있어 `core/` 를 되돌려 가며 재지 않았다)
+
+## 2026-11-25 — 이름 대조(연도 · 회차) · S4 「기관 소개」 · HEAD 수집 안내 (커밋 전 변경)
+
+- **사고** — 실제 수집 `runs/RUN-261125184918-…/collect`(서울 자치구 축제 20곳 · `official_url`)이 받음 0 으로 끝났다. `NAME_NOT_ON_PAGE` 10 · robots 11 · 찾은 URL 없음 4 · 후보 3
+- **① 이름** — `core/collector/verify.py` `core_name()` · `_name_patterns()` · `_name_whole_in()` · `check_official_url()`. 이름 앞뒤의 연도 · 회차를 떼고 견준다(남는 것이 네 글자 미만이면 떼지 않는다). 낱말 경계는 뗀 이름에 그대로 서고, 앞에 맞닿아도 되는 한글은 연도 · 회차의 끝뿐이다. 설계 §6.4.1
+- **② S4 「기관 소개」(공작 결정)** — `.go.kr` 의 깊은 쪽이 제목 · 첫 h1 에 이름을 싣고 그 해의 축제 날짜(`DATES`)가 있으며 뉴스 · 게시판 · 목록 · 검색 꼴이 아니면 **그 쪽의 전체 URL** 을 받는다(`match_rule` `S4`). S1 ~ S3 는 그대로다. 같은 대상에 더 센 규칙의 값이 있으면 S4 는 후보(`S4_YIELDED`)로 물러난다(`cli.py` ⑨). `normalize_url()` 이 `gclid` · `igshid` · `mc_cid` · `mc_eid` · `_ga` · `;jsessionid=` 도 뗀다. 설계 §6.4.2
+- **③ HEAD 안내** — `agents/head.py` `ORDER_SCHEMA_TEXT`(쓰는 곳은 둘이다 — `BaseHead.plan_next` 와 `claude_head.py` `chat`. `codex_head.py` 에는 collect 안내가 원래 없다) · `plan_next` 의 WEB DATA · `claude_head.py` `chat` 의 WEB DATA. 「대상 id 는 ASCII(`t01`) · 진짜 열쇠는 `known.ref`」 · 「`collect.output.path` 는 아직 없는 새 파일 — 앞 단계 · 앞 미션이 쓴 이름이면 `COLLECT_OUTPUT_EXISTS` 로 멈추니 묶음 번호를 붙인다」. `known` 은 원래 자유 글 사전이라 스키마는 바꾸지 않았다(시험으로 확인)
+- **바꾼 옛 시험** — `test_city_hall_deep_page_does_not_make_the_city_origin_official`(실제 저장 글 `suwon.go.kr` 축제 소개 쪽 · 2026 날짜 있음): 후보 → **S4 로 받음**. 공작 결정이 바꾼 바로 그 경우다. 그 글의 「일정 2026. 10. 4.(일) ~ 10. 11.(일)」 이 `DATES` 다. 값이 시청 origin 이 아니라 그 쪽이라는 단언은 그대로이고, 대상 연도가 다르면 예전처럼 후보라는 단언을 더했다
+- **저장된 20곳 다시 판정(네트워크 없음)** — **받음 0**. 이름 수정으로 t18 한 쪽이 거부에서 후보로 올라왔고(뉴스 호스트라 S4 는 아니다), S4 꼴로 받은 쪽은 t15 하나인데 본문에 연도가 없어 `NO_DATE_THIS_YEAR` 다(그 조건을 빼면 받음 1). S4 꼴의 다른 쪽 다섯은 robots 금지로 받지 못했다. 표는 설계 §6.4.2
+- **남긴 것** — 설계 §6.4.1 · §6.4.2 의 「남는 것」. robots 금지(이번 실행 11건 가운데 `culture.seoul.go.kr` · `festival.seoul.go.kr` · `mapo.go.kr` · 구청 첫 화면)는 손대지 않았다 — 받기 규칙은 이 변경의 범위가 아니다
+
+- **리뷰** — agy Neon high + fable 서브에이전트. 지적을 원본에 대어 가리고 고쳤다 — 아래 「리뷰 결과 — 이름 대조 · S4」. **이 절의 규칙(뗀 이름이 닿는 곳 · S1 · S4 조건)과 시험 수는 리뷰 전의 것이다** — 지금 규칙은 `docs/COLLECTOR_DESIGN.md` §6.4.1 · §6.4.2 다
+
+- **시험** — `tests/test_collector_s4_names.py` 61건(새 파일). 전체 **1219 통과 · 0 실패 · 3 제외**(350초 · 마지막 코드 수정 뒤 한 번 실행 · 고치기 전 1158 → +61). 새 시험은 구현 전에 가져오기 오류로 실패하는 것을 봤다. 저장소 `runs/` 폴더 수는 전체 시험 전후 4,700 그대로다. 다시 판정은 읽기만 했다(`runs/` 에 쓰지 않았다)
+
+### 리뷰 결과 — 이름 대조 · S4 (2026-11-25 · agy Neon high + fable 서브에이전트 · 커밋 전 변경 · codex 는 한도)
+
+지적마다 고치기 전 코드에서 재현한 뒤(`decide_official_url()` · `verify_claim()` · `core_name()` · `normalize_url()` 을 직접 불렀다) 실패하는 시험을 먼저 쓰고 고쳤다. 고친 곳은 `core/collector/verify.py` 하나다.
+
+| # | 누가 | 지적 | 판정 | 고친 것 |
+|---|---|---|---|---|
+| 1 | fable 1 (HIGH) | S4 의 그 해 날짜가 그 축제에 묶여 있지 않다 — 「게시기간」 · 「최종수정일시」 · 「조회기간」 · 「이달의 일정」 · 이웃 축제의 날짜, 이름은 띠 h1 · 제목에만 있고 본문은 다른 행사 | CONFIRMED(다섯 꼴 모두 S4 로 받았다) | `festival_date_near()` — 본문(첫 h1 의 줄은 뺀다)의 이름 뒤 150자 · 앞 40자 안의 날짜만 세고, 그 사이에 다른 축제 이름이 있으면 세지 않는다. 쪽 자체의 날짜 낱말(`_PAGE_DATE`)과 한글이 맞닿은 표지(「게시기간」)는 뺀다. 「행사기간」 · 「축제기간」 · 「개최일시」 는 그대로 표지다. 새 `s4_blocker` `DATE_NOT_NEAR_NAME`. S1D · S3 의 `DATES` 는 바꾸지 않았다 |
+| 2 | fable 2 (HIGH) · agy 2 · agy 4 | 뗀 이름이 날짜를 보지 않는 S1 에 닿는다 — 「2026 강북 백맥축제」 ↔ 제목 「2024 강북 백맥축제」, 「2026 봄꽃축제」 ↔ 「성북 봄꽃축제」(S1 · S4), 「2026 봄꽃축제 (동대문구)」 ↔ 영등포구 쪽, 「2030 청년페스티벌」 → 「청년페스티벌」 | CONFIRMED | `title_name_kind()` — 제목 · h1 의 이름 앞뒤에 다른 연도가 붙어 있으면 맞은 것으로 치지 않는다. 뗀 이름으로만 맞았으면 S1 도 이름 곁의 그 해 날짜가 있어야 한다(`STRIPPED_NAME_NEEDS_DATE`). 연도 · 회차를 뗀 이름이 보통 낱말뿐이면 후보에서 뺀다(`_generic_name` — 이름 전체와 끝의 괄호를 뗀 이름은 늘 남는다). `core_name(name, year)` 는 대상 연도만 뗀다. S4 는 `known.area` 의 마지막 낱말이 쪽에 있어야 한다(`AREA_NOT_ON_PAGE`) |
+| 3 | fable 3 (MED) | 뗀 이름이 주소 · 폐업 대조에 닿는다 — 「평양면옥 1985」 ↔ 「평양면옥 논현점 폐업」 | CONFIRMED(`closed` 를 받았다) | `_name_cands(strip=)` — 뗀 이름은 `official_url` 의 두 길(`_name_in` · `_name_whole_in`)에만 쓴다. `name_near()` 는 예전대로다 |
+| 4 | fable 4 (MED) | `normalize_url()` 이 값을 망가뜨린다 — EUC-KR 퍼센트 부호가 `%EF%BF%BD` 로, 「a=1;b=2」 가 `a=1%3Bb%3D2` 로, 값 없는 열쇠에 「=」 가 붙고 끝 「/」 가 떨어진다. 질의의 `JSESSIONID` · `PHPSESSID` · `sid` · `token` 은 남는다 | CONFIRMED | `clean_url()` — 값은 원래 질의 글에서 조각만 걸러 만든다(다시 부호화하지 않는다 · 끝 「/」 유지). 추적 · 분명한 세션 열쇠 목록을 늘렸다. `normalize_url()` 은 견줄 때만 쓴다. **`sid` · `token` 꼴은 떼지 않고 S4 에서 받지 않는다**(`SESSION_QUERY`) — 쪽 번호일 수도 있어 떼면 다른 쪽이 된다 |
+| 5 | fable 5 (LOW) · agy 5 | 게시판 · 뉴스 꼴이 샌다 — `/brd/view.do` · `/bodo/` · `/article/N` · `q` · `kwd` · `srchWrd` · `page` · `pageIndex` · `menu=board`, `/%62oard/`, `gnews` · `enews` · `newsroom`, `?mode=list&mid=notice` | CONFIRMED(전부 `None` 이었다) | 경로는 퍼센트 부호를 풀고 본다 · 경로 낱말 `brd` · `bodo` · `article` · 질의 열쇠 `srch` · `kwd` 와 통째로 같은 `q` · `page` · `pageindex` …(「pgmId」 · 「pSeq」 는 그대로 지난다) · 질의 값 · 호스트 낱말은 부분 문자열 |
+| 6 | fable 6 (LOW) · agy 3 | 목록 판정이 샌다 — 대상 이름이 요약 문구에 한 번 더 나오면 이웃이 모두 탈락 · 「축제」 낱말 없는 이웃 행사 · 앞 낱말만 다른 표기가 따로 세어진다 | CONFIRMED | `other_dated_lines()` — 대상 이름이 없는 줄의 그 해 날짜가 서로 다른 날로 셋이면 목록이다(한 줄에서는 첫 날짜만 · 「접수 · 수정」 줄과 그 다음 칸은 뺀다). `other_festival_names()` 는 뒤쪽 낱말 묶음마다 세어 표기를 합친다 |
+| 7 | agy 1 | `core_name("강남문화제 3회")` → 「강남문화」 — 「제N회」 갈래가 이름 끝의 「제」 를 먹는다 | CONFIRMED | 「제」 앞에 한글이 맞닿아 있으면 회차가 아니다. 본문 앞쪽 검사(`_EDGE_BEFORE`)는 「2026년제6회」 처럼 겹친 꼴도 받는다 |
+| 8 | agy 6 | S4 값에 임의 질의가 남는다(`&note=IGNORE_RULES_DO_X`) | 값에 남는 것은 CONFIRMED · 프롬프트 주입은 해당 없음 — `stage.builder_preview` 가 호스트까지만 보인다(시험 있음) | 질의 조각 여섯 개 · 조각마다 48자를 넘으면 받지 않는다(`QUERY_TOO_LONG`). 짧은 임의 질의는 남는다 |
+
+- **agy 2 가운데 고치지 않은 것** — 띄어 쓴 「부산 봄꽃축제」 가 「봄꽃축제」 로 읽히는 것(`_name_whole_in` 은 낱말 경계만 본다). 뗀 이름으로는 이제 닿지 않고, 지시서의 이름 자체가 「봄꽃축제」 일 때만 남는다 — S4 는 지역으로 거른다
+- **바꾼 옛 시험 셋**(`tests/test_collector_s4_names.py`) — `test_stripped_name_reaches_every_check_…` → `test_stripped_name_reaches_both_official_url_checks_and_nothing_else`(주소 대조는 이제 `NAME_NOT_NEAR_VALUE`) · `test_decide_no_longer_rejects_a_page_that_omits_the_year`(본문에 이름 + 그 해 날짜를 넣었다 — 없으면 후보) · `test_s4_works_with_a_stripped_name_and_first_h1`(본문에도 이름을 넣었다 — 첫 h1 뿐이면 후보)
+- **닫힌 쪽으로 잃은 것** — 첫 h1 에만 이름이 있고 본문에 다시 적지 않은 소개 쪽 · 연도를 뺀 제목에 날짜가 없는 `.go.kr` 축제 첫 화면은 후보로 간다. 설계 §6.4.1 · §6.4.2 의 표와 「남는 것」 을 지금 규칙으로 고쳤다
+- **저장된 20곳 다시 판정(네트워크 없음 · `runs/` 에 쓰지 않았다)** — 고치기 전후가 같다: **받음 0** · 후보 3 대상(t05 · t15 · t18) · t15 는 여전히 `NO_DATE_THIS_YEAR`(그 조건을 빼면 1)
+- **시험** — `tests/test_collector_s4_names.py` 61 → 113건(+52). 새 시험은 고치기 전에 실패하는 것을 봤다 — 48건 가운데 `clean_url` 여섯과 `core_name(name, year)` 하나는 없는 이름 · 인자라 오류로, 나머지는 단언에서 실패했다. 전체 **1271 통과 · 0 실패 · 3 제외**(443초 · 고치기 전 1219 → +52 · 마지막 코드 수정 뒤 한 번). `runs/` 폴더 수 4,700 · `git diff config.yaml` 의 해시는 전후가 같다
+- **`data/` 에서 본 것** — 첫 전체 시험 사이(19:55:25)에 `data/` 의 항목 수가 7 → 6 으로 줄었다. 수만 적어 두어 이름은 모른다. 본 것: 시험은 임시 DB 를 쓴다(`tests/conftest.py` `isolate_provider_db` · 잠금 폴더도 그 아래) · 남은 여섯(`cli-omc-state` · `companion.err` · `companion.log` · `director.db` · `missions` · `solomon-bridge.token`)의 수정 시각은 모두 이 작업 전이다 · 이 변경의 코드는 `data/` 에 쓰지 않는다. 두 번째 전체 시험은 전후 이름 목록을 적어 견줬다 — 같다(일곱 항목 그대로)

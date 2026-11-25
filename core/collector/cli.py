@@ -224,12 +224,18 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
             claims[-1]["verdict"] = "accepted"
             claims[-1]["_row"] = row
         elif d.outcome == "unverifiable":                    # 후보 — 사람이 본다(candidates.csv)
-            unverifiable.append({**row, "detail": d.detail})
+            unverifiable.append({**row, "detail": d.detail, **({"s4_blocker": d.s4_blocker} if d.s4_blocker else {})})
         else:
             rejected.append(row)
 
     # ⑨ 모순 · 중복 정리
     acc_rows = [c.pop("_row") for c in claims if "_row" in c]
+    # S4(기관 소개 쪽)는 더 센 규칙에 자리를 내준다 — 그 축제 자신의 사이트(S1 · S1D · S2 · S3 · exact)를 받았으면 소개 쪽은 후보로 둔다.
+    # 그대로 두면 값이 달라 둘 다 CONFLICT 로 떨어진다. S4 끼리 값이 다르면 예전처럼 CONFLICT 다
+    strong = {r["target_id"] for r in acc_rows if r["field"] == OFFICIAL and r.get("match_rule") != "S4"}
+    for r in [x for x in acc_rows if x["field"] == OFFICIAL and x.get("match_rule") == "S4" and x["target_id"] in strong]:
+        acc_rows.remove(r)
+        unverifiable.append({**r, "reason_code": "NEEDS_HUMAN_REVIEW", "detail": "S4_YIELDED"})
     conflicts = conflict_keys(acc_rows)
     accepted: List[dict] = []
     seen = set()

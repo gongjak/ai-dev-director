@@ -63,7 +63,10 @@ bootstrap:
 #     verification:
 #       build_command: ["npm", "run", "build"]
 #       test_command: "python -m pytest -q"
-projects: {}
+projects:
+  "/Users/sungjaeyun/Developer/oss/festival-map":
+    verification:
+      test_command: ["uv", "run", "--python", "3.12", "--project", "collector", "pytest", "-q", "collector/tests"]
 
 autonomy:
   enabled: true
@@ -82,7 +85,7 @@ autonomy:
   # off | on_done (only when HEAD declared the goal done) | on_pass (any PASSED deliverable).
   # Apply never overwrites a file the operator changed meanwhile (conflict -> blocked, worktree kept) and never deletes.
   # Default "off": you press 반영 after looking at the result.
-  auto_apply: on_pass         # 포크: 병합 전 동작을 유지한다
+  auto_apply: "off"           # 2026-11-25 festival-map 시험 중 — 끝나면 on_pass 로 되돌린다
   profiles:                    # budgets per request size; gates and Scope Guard are the same in every profile
     quick:    {max_steps: 2, max_repairs: 1, builder_attempts: 2}
     standard: {max_steps: 6, max_repairs: 3, builder_attempts: 3}

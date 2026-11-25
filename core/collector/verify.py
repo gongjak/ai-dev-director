@@ -4,9 +4,10 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from functools import lru_cache
 from html.parser import HTMLParser
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 from core.collector.netfetch import check_url_format, domain_reason
 from core.collector.order import Domains
@@ -311,14 +312,49 @@ def normalize_address(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
-def normalize_url(url: str) -> str:
+_TRACKING_KEYS = {"fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "_ga", "_gl", "msclkid", "dclid", "yclid", "wbraid",
+                  "gbraid", "twclid", "ttclid", "srsltid", "_hsenc", "_hsmi", "mkt_tok"}
+# 방문마다 다른 값인 것이 분명한 열쇠 — 뗀다. 「aspsessionid…」 는 뒤에 임의 글자가 붙는다
+_SESSION_KEYS = {"jsessionid", "phpsessid", "sessionid", "session_id", "sessid", "cfid", "cftoken"}
+# 세션일 수도 쪽 번호일 수도 있는 열쇠 — 떼면 다른 쪽이 되고 두면 남의 세션이 값에 남는다. 견줄 때는 그대로 두고 S4 는 받지 않는다
+SESSION_LIKE_KEYS = {"sid", "token", "access_token", "auth_token", "auth", "csrf", "_csrf", "csrf_token", "ticket"}
+_SESSION_ID = re.compile(r";jsessionid=[^/?#;]*", re.I)
+
+
+def _query_key(piece: str) -> str:
+    return unquote(piece.split("=", 1)[0]).strip().lower()
+
+
+def _query_pieces(query: str) -> List[Tuple[str, str]]:
+    """질의 글을 「&」 · 「;」 로 가른 [(앞의 구분 글자, 조각)] — 추적 · 세션 열쇠의 조각은 뺀다. 조각의 글자는 건드리지 않는다."""
+    parts = re.split(r"([&;])", query or "")
+    out: List[Tuple[str, str]] = []
+    for i in range(0, len(parts), 2):
+        key = _query_key(parts[i])
+        if not parts[i] or key.startswith("utm_") or key in _TRACKING_KEYS or key in _SESSION_KEYS \
+                or key.startswith("aspsessionid"):
+            continue
+        out.append((parts[i - 1] if i else "&", parts[i]))
+    return out
+
+
+def clean_url(url: str) -> str:
+    """값으로 놓을 URL — 호스트 소문자 · 기본 포트 없음 · 추적 · 세션 열쇠 없음. 리뷰(fable 4) — 질의는 다시 부호화하지 않고
+    원래 글에서 조각만 거른다(EUC-KR 퍼센트 부호 · 「;」 구분 · 값 없는 열쇠가 깨지지 않게). 끝 「/」 도 그대로 둔다 — 다른 쪽일 수 있다."""
     p = urlsplit((url or "").strip())
     host = (p.hostname or "").lower()
     port = p.port
     netloc = host if port in (None, 80, 443) else f"{host}:{port}"
-    query = urlencode([(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
-                       if not k.lower().startswith("utm_") and k.lower() != "fbclid"])
-    return urlunsplit((p.scheme.lower(), netloc, p.path.rstrip("/"), query, ""))
+    pieces = _query_pieces(p.query)
+    query = "".join((sep if j else "") + piece for j, (sep, piece) in enumerate(pieces))
+    path = _SESSION_ID.sub("", p.path)                   # 「/a.do;jsessionid=…」 — 방문마다 다른 값이다
+    return urlunsplit((p.scheme.lower(), netloc, path, query, ""))
+
+
+def normalize_url(url: str) -> str:
+    """견줄 때의 URL — clean_url 에서 끝 「/」 를 뗀 것(값으로 놓지 않는다)."""
+    p = urlsplit(clean_url(url))
+    return urlunsplit((p.scheme, p.netloc, p.path.rstrip("/"), p.query, ""))
 
 
 # ---- 대조 §6.2 ----
@@ -392,20 +428,90 @@ def _compact(text: str) -> str:
 
 
 MIN_NAME_CHARS = 2
+CORE_NAME_MIN_CHARS = 4                       # 연도 · 회차를 떼고 남는 이름의 최소 길이 — 「카페 1984」 를 「카페」 로 줄이지 않는다
+# 이름 앞뒤의 연도(「2026」 · 「2026년」 · 「2026년도」)와 회차(「제6회」 · 「6회」). 지시서의 이름은 그 해의 행사 이름이고
+# 페이지는 해마다 같은 이름을 쓴다(2026-11-25 실제 수집 — 「2026 강북 백맥축제」 · 「제6회 강서문화예술페스티벌」 이 NAME_NOT_ON_PAGE)
+# 「제」 없는 「N회」 는 뒤가 띄어져 있을 때만 회차다 — 「1회용품 없는 축제」 의 「1회」 는 회차가 아니다
+_EDGE_YEAR = r"(?:19|20)\d\d"
 
 
-def _name_patterns(name: str) -> List["re.Pattern"]:
-    """이름 전체와, 끝의 괄호(「(청담점)」)를 뗀 이름. 문장부호를 뺀 길이가 MIN_NAME_CHARS 미만이면 쓰지 않는다."""
-    out = []
-    for cand in dict.fromkeys([name or "", re.sub(r"\s*[(（\[].*?[)）\]]\s*$", "", name or "")]):
+def _edge_token(year_src: str = _EDGE_YEAR, lookbehind: bool = True) -> str:
+    # 리뷰(agy 1) — 「제N회」 의 「제」 앞에 한글이 맞닿아 있으면 이름의 끝 글자다(「강남문화제 3회」 의 「제」)
+    lb = r"(?<![가-힣])" if lookbehind else ""
+    return (rf"(?:(?<!\d){year_src}\s*(?:년도?)?|{lb}제\s*\d{{1,3}}\s*회(?!차)"
+            r"|(?<![\d가-힣])\d{1,3}\s*회(?=\s|$))")
+
+
+@lru_cache(maxsize=64)
+def _edge_patterns(year: str):
+    """(앞, 뒤) — year 가 네 자리 연도면 그 해만 연도로 뗀다."""
+    tok = _edge_token(re.escape(year) if re.fullmatch(_EDGE_YEAR, year or "") else _EDGE_YEAR)
+    return re.compile(r"^\s*" + tok + r"(?!\d)\s*"), re.compile(r"\s*" + tok + r"\s*$")
+
+
+# 본문에서 이름 바로 앞에 붙은 연도 · 회차(「2026년」 · 「제6회」 · 「2026년제6회」)
+_EDGE_BEFORE = re.compile(r"(?:^|[^가-힣])(?:" + _edge_token(lookbehind=False) + r"[\W_]*)+$")
+
+
+def core_name(name: str, year: str = "") -> str:
+    """앞뒤의 연도 · 회차를 뗀 이름(「2026 강북 백맥축제」 → 「강북 백맥축제」). 남는 것이 CORE_NAME_MIN_CHARS 미만이면 떼지 않는다 —
+    그런 이름은 어디에나 있다. 가운데의 수(「을지로3가」 · 「구스테이크 528」)는 건드리지 않는다.
+    리뷰(agy 4) — year(대상 연도)를 주면 그 해만 연도로 뗀다. 「2030 청년페스티벌」 의 2030 은 개최 연도가 아니다."""
+    head, tail = _edge_patterns(year or "")
+    t = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", name or "").translate(_ZW)).strip()
+    cur = t
+    while True:
+        nxt = tail.sub("", head.sub("", cur, count=1), count=1).strip()
+        if nxt == cur:
+            break
+        cur = nxt
+    return cur if cur != t and len(_compact(cur)) >= CORE_NAME_MIN_CHARS else t
+
+
+_FEST_WORD = r"(?:축제|페스티벌|페스타|문화제|예술제|대잔치|한마당|festival)"
+# 리뷰(fable 2 · agy 2) — 뗀 이름이 보통 낱말뿐이면(「봄꽃축제」 · 「가을문화축제」) 어느 지자체에나 있는 이름이다.
+# 그런 이름으로는 견주지 않는다 — 지시서의 이름 전체(지역 · 연도 · 괄호까지)가 있어야 한다. 네 글자 이하도 같다
+GENERIC_NAME_MAX_CHARS = 4
+_GENERIC_WORDS = ("봄꽃|벚꽃|장미|불꽃|단풍|국화|꽃|봄|한여름|여름|가을|겨울|문화|예술|음악|수제맥주|맥주|어린이날|어린이|청소년|청년|"
+                  "가족|주민|구민|시민|마을|거리|골목|전통|김장|송년|신년|새해|해맞이|해넘이|크리스마스|한가위|추석|단오|정월|대보름|"
+                  "등불|별빛|달빛|빛|밤|야시장|먹거리|독서|책|평생학습|나눔|사랑|행복|희망|건강|체육|생활|한마음|어울림|우리|동네")
+_GENERIC_NAME = re.compile(rf"(?:{_GENERIC_WORDS})*(?:{_FEST_WORD}|마켓|버스킹|행사|큰잔치|잔치|야행)?")
+
+
+def _generic_name(compact: str) -> bool:
+    return len(compact) <= GENERIC_NAME_MAX_CHARS or _GENERIC_NAME.fullmatch(compact) is not None
+
+
+def _name_cands(name: str, strip: bool = False, year: str = "") -> List[Tuple[str, str]]:
+    """견줄 이름들 [(kind, 이름)] — kind 는 「full」(지시서의 이름 · 끝의 괄호를 뗀 이름) · 「core」(앞뒤의 연도 · 회차를 뗀 이름).
+    strip 이 아니면 예전처럼 이름 전체와 괄호를 뗀 이름뿐이다 — 리뷰(fable 3): 뗀 이름은 official_url 에만 쓴다
+    (「평양면옥 1985」 ↔ 「평양면옥 논현점」). strip 이면 연도 · 회차를 뗀 이름을 더하되 보통 낱말뿐인 것은 뺀다 —
+    이름 전체와 괄호를 뗀 이름은 늘 남는다(「우래옥 (본점)」 → 「우래옥」)."""
+    name = name or ""
+    no_paren = re.sub(r"\s*[(（\[].*?[)）\]]\s*$", "", name)
+    if not strip:
+        cands = [("full", name), ("full", no_paren)]
+    else:
+        cands = [("full", name)]
+        for kind, cand in (("full", no_paren), ("core", core_name(name, year)), ("core", core_name(no_paren, year))):
+            if cand != name and (kind == "full" or not _generic_name(_compact(cand))):
+                cands.append((kind, cand))
+    out, seen = [], set()
+    for kind, cand in cands:
         c = _compact(cand)
-        if len(c) >= MIN_NAME_CHARS:
-            out.append(re.compile(r"[\W_]*".join(re.escape(ch) for ch in c)))
+        if len(c) >= MIN_NAME_CHARS and c not in seen:
+            seen.add(c)
+            out.append((kind, c))
     return out
 
 
+def _name_patterns(name: str, strip: bool = False, year: str = "") -> List["re.Pattern"]:
+    """_name_cands 의 이름마다 공백 · 문장부호를 무시하는 패턴. 문장부호를 뺀 길이가 MIN_NAME_CHARS 미만이면 쓰지 않는다."""
+    return [re.compile(r"[\W_]*".join(re.escape(ch) for ch in c)) for _, c in _name_cands(name, strip, year)]
+
+
 def name_near(name: str, body: str, start: int, end: int, window: int = NAME_WINDOW) -> bool:
-    """body(이미 정규화한 본문)의 [start, end) 앞뒤 window 자 안에 이름이 있는가."""
+    """body(이미 정규화한 본문)의 [start, end) 앞뒤 window 자 안에 이름이 있는가. 주소 · 폐업 대조용 — 연도 · 회차를 떼지 않는다."""
     near = body[max(0, start - window):end + window]
     return any(p.search(near) for p in _name_patterns(name))
 
@@ -504,7 +610,7 @@ def check_official_url(value: str, final_url: str, known_name: str, page: str, d
         return "DOMAIN_DENIED"
     if _host_in(parsed[1], NON_OFFICIAL_HOSTS):
         return "NOT_OFFICIAL_HOST"
-    if not known_name or normalize(known_name) not in normalize(page):
+    if not known_name or not _name_in(known_name, page):       # 공백 · 문장부호 · 앞뒤의 연도 · 회차를 무시한다(official_url 뿐)
         return "NAME_NOT_ON_PAGE"
     od = (official_domain or "").strip().lower().rstrip(".")
     if not od or is_public_suffix(od) or not _host_in(parsed[1], (od,)):
@@ -591,22 +697,70 @@ def is_home_page(requested_url: str, final_url: str) -> bool:
             and _bare(req.hostname or "") == _bare(fin.hostname or ""))
 
 
-def _name_in(name: str, text: str) -> bool:
-    """공백 · 문장부호를 무시하고 이름이 있는가(「대구 치맥페스티벌」 = 「대구치맥페스티벌」)."""
-    return any(p.search(normalize(text)) for p in _name_patterns(name))
+def _name_in(name: str, text: str, year: str = "") -> bool:
+    """공백 · 문장부호 · 앞뒤의 연도 · 회차를 무시하고 이름이 있는가(「대구 치맥페스티벌」 = 「대구치맥페스티벌」). official_url 용."""
+    return any(p.search(normalize(text)) for p in _name_patterns(name, True, year))
 
 
-def _name_whole_in(name: str, text: str) -> bool:
+def _whole_matches(name: str, t: str, year: str = ""):
+    """정규화한 글 t 에서 이름이 「낱말째로」 선 자리 — (kind, start, end)."""
+    for (kind, c), p in zip(_name_cands(name, True, year), _name_patterns(name, True, year)):
+        for m in p.finditer(t):
+            before, after = t[m.start() - 1:m.start()] if m.start() else "", t[m.end():m.end() + 1]
+            # 앞에 맞닿은 한글이 연도 · 회차의 끝(「2026년」 · 「제6회」)이면 다른 이름의 일부가 아니다 — 띄어 쓰지 않은 꼴
+            before_ok = (not re.match(r"[가-힣]", before or " ")
+                         or _EDGE_BEFORE.search(t[max(0, m.start() - 12):m.start()]) is not None)
+            if before_ok and not re.match(r"[가-힣]", after or " "):
+                yield kind, m.start(), m.end()
+
+
+def _name_whole_in(name: str, text: str, year: str = "") -> bool:
     """이름이 「낱말째로」 있는가 — 앞뒤에 한글이 맞닿아 있으면 다른 이름의 일부다(리뷰 fable 3: 「장미축제」 ↔ 「서울장미축제」 ·
     「장미축제추진위원회」). 조사가 붙은 꼴(「장미축제에 오신…」)도 세지 않는다 — 닫힌 쪽으로 틀린다. 숫자 · 영문 · 기호는 맞닿아도 된다.
     띄어 쓴 「서울 장미축제」 는 막지 못한다(낱말 경계만 본다)."""
+    return next(_whole_matches(name, normalize(text), year), None) is not None
+
+
+_YEAR_BEFORE = re.compile(r"(?<!\d)(" + _EDGE_YEAR + r")\s*(?:년도?)?[\W_]*(?:제?\s*\d{1,3}\s*회[\W_]*)?$")
+_YEAR_AFTER = re.compile(r"[\W_]*(?:제?\s*\d{1,3}\s*회[\W_]*)?(" + _EDGE_YEAR + r")(?!\d)")
+
+
+def title_name_kind(name: str, text: str, year: str) -> str:
+    """제목 · h1 에 이름이 낱말째로 있으면 「full」(이름 전체) · 「core」(연도 · 회차를 뗀 이름으로만), 없으면 「」.
+    리뷰(fable 2 · agy 4) — 이름 바로 앞뒤에 대상 연도와 다른 연도가 붙어 있으면(「2024 강북 백맥축제」) 그 해의 쪽이 아니다."""
     t = normalize(text)
-    for p in _name_patterns(name):
-        for m in p.finditer(t):
-            before, after = t[m.start() - 1:m.start()], t[m.end():m.end() + 1]
-            if not re.match(r"[가-힣]", before or " ") and not re.match(r"[가-힣]", after or " "):
-                return True
-    return False
+    kinds = set()
+    for kind, a, b in _whole_matches(name, t, year):
+        near = [m.group(1) for m in (_YEAR_BEFORE.search(t[max(0, a - 24):a]), _YEAR_AFTER.match(t[b:b + 24])) if m]
+        if re.fullmatch(_EDGE_YEAR, year or "") and any(y != year for y in near):
+            continue
+        kinds.add(kind)
+    return "full" if "full" in kinds else "core" if kinds else ""
+
+
+# 리뷰(fable 1) — 쪽 자체의 날짜(게시 · 수정 · 조회 기간 · 이달의 달력)는 축제 날짜가 아니다. S4 와 뗀 이름의 S1 이 본다
+_PAGE_DATE = re.compile(r"게시|수정|조회|이달|작성|갱신|업데이트|검색")
+# 표지 「기간 · 일시 · 일정 · 개최」 앞에 한글이 맞닿아 있으면 다른 낱말이다(「게시기간」 · 「수정일시」) — 축제 쪽 낱말만 붙어도 된다
+_LABEL_PREFIX = r"(?:(?<![가-힣])|(?<=행사)|(?<=축제)|(?<=개최)|(?<=운영)|(?<=공연)|(?<=진행))"
+
+
+def _festival_dates(text: str, year: str, strict: bool = False) -> List["re.Match"]:
+    """정규화한 글에서 그 해의 축제 날짜로 읽히는 자리들(official_signals 의 DATES). strict 면 쪽 자체의 날짜도 뺀다."""
+    y = rf"(?<!\d){re.escape(year)}"
+    md = r"\d{1,2}\s*[.\-/월]\s*\d{1,2}"
+    date = rf"{y}\s*[.\-/년]\s*{md}\s*일?\.?"
+    # 범위의 뒤쪽 — 「05.10」 · 「5월 10일」 · 「2026.05.10」 · 「10일」. 숫자 하나(「- 1차 안내」)는 날짜가 아니다
+    tail = rf"(?:(?:\d{{4}}\s*[.\-/년]\s*)?{md}|\d{{1,2}}\s*일)(?!\d)"
+    ranged = date + r"\s*(?:\([^)]{1,4}\))?\s*(?:\d{1,2}:\d{2}\s*)?[~\-–—]\s*\(?" + tail
+    labeled = (_LABEL_PREFIX if strict else "") + r"(?:기간|일시|일정|개최)\s*[:|]?\s*" + date
+    out = []
+    # 「모집 기간 · 접수 2026.04.13 ~ 04.20」 · 「2026.04.13 ~ 04.20 참가 부스 모집」 은 축제 날짜가 아니다
+    for m in re.finditer(f"(?:{ranged})|(?:{labeled})", text):
+        before, after = text[max(0, m.start() - 14):m.start()], text[m.end():m.end() + 14]
+        if _NOT_FESTIVAL_DATE.search(before) or _NOT_FESTIVAL_DATE.search(after) or (strict and _PAGE_DATE.search(before)):
+            continue
+        out.append(m)
+    return out
 
 
 def official_signals(page: PageText, year: str) -> List[str]:
@@ -620,17 +774,8 @@ def official_signals(page: PageText, year: str) -> List[str]:
         return []
     y = rf"(?<!\d){re.escape(year)}"
     text = normalize(page.full())
-    md = r"\d{1,2}\s*[.\-/월]\s*\d{1,2}"
-    date = rf"{y}\s*[.\-/년]\s*{md}\s*일?\.?"
-    # 범위의 뒤쪽 — 「05.10」 · 「5월 10일」 · 「2026.05.10」 · 「10일」. 숫자 하나(「- 1차 안내」)는 날짜가 아니다
-    tail = rf"(?:(?:\d{{4}}\s*[.\-/년]\s*)?{md}|\d{{1,2}}\s*일)(?!\d)"
-    ranged = date + r"\s*(?:\([^)]{1,4}\))?\s*(?:\d{1,2}:\d{2}\s*)?[~\-–—]\s*\(?" + tail
-    labeled = r"(?:기간|일시|일정|개최)\s*[:|]?\s*" + date
     out = []
-    # 「모집 기간 · 접수 2026.04.13 ~ 04.20」 · 「2026.04.13 ~ 04.20 참가 부스 모집」 은 축제 날짜가 아니다
-    if any(not _NOT_FESTIVAL_DATE.search(text[max(0, m.start() - 14):m.start()])
-           and not _NOT_FESTIVAL_DATE.search(text[m.end():m.end() + 14])
-           for m in re.finditer(f"(?:{ranged})|(?:{labeled})", text)):
+    if _festival_dates(text, year):
         out.append("DATES")
     if _ORGANIZER.search(normalize_lines(page.full())):
         out.append("ORGANIZER")
@@ -639,6 +784,173 @@ def official_signals(page: PageText, year: str) -> List[str]:
     if re.search(rf"{yb}.{{0,40}}?{_PROGRAM_WORDS}|{_PROGRAM_WORDS}.{{0,40}}?{yb}", text):
         out.append("PROGRAM")
     return out
+
+
+S4_DATE_AFTER_NAME = 150                      # 본문의 이름 뒤 이만큼 안에 날짜가 있어야 그 축제의 날짜다(실제 suwon.go.kr — 1자)
+S4_DATE_BEFORE_NAME = 40                      # 「2026. 4. 4. ~ 4. 5. 동대문구 봄꽃축제 개최」 꼴
+_FEST_NAME = re.compile(r"([가-힣a-z0-9]+) ?" + _FEST_WORD + r"(?![가-힣])")
+_FEST_MODIFIER_END = "는은한의될된던을를"       # 「열리는 축제」 · 「다양한 축제」 는 이름이 아니다
+_FEST_MODIFIER = {"이번", "올해", "우리", "지역", "대표", "본"}
+
+
+def _other_festival_in(text: str, own: List[str]) -> bool:
+    """글에 대상이 아닌 축제 이름이 있는가 — 이름과 날짜 사이에 끼면 그 날짜는 남의 것이다."""
+    for m in _FEST_NAME.finditer(text):
+        stem = m.group(1)
+        key = _compact(m.group(0))
+        if stem[-1] in _FEST_MODIFIER_END or stem in _FEST_MODIFIER or any(o in key or key in o for o in own):
+            continue
+        return True
+    return False
+
+
+def _body_lines(page: PageText) -> List[str]:
+    """본문의 줄들 — 첫 h1 의 줄은 뺀다. 띠 h1 은 사이트의 것일 수 있어 본문에 이름이 있다는 증거가 아니다(제목은 원래 본문에 없다)."""
+    lines = normalize_lines(page.text).split("\n")
+    h1 = normalize(page.h1)
+    if h1 and h1 in lines:
+        lines.remove(h1)
+    return lines
+
+
+def festival_date_near(name: str, page: PageText, year: str) -> bool:
+    """리뷰(fable 1) — 그 해의 축제 날짜가 「본문의 그 이름 곁」 에 있는가. 쪽 어딘가의 2026 날짜(게시 기간 · 수정 일시 · 달력 ·
+    이웃 축제의 날짜)로는 모자란다. 이름 뒤 S4_DATE_AFTER_NAME 자(또는 앞 S4_DATE_BEFORE_NAME 자) 안이고,
+    그 사이에 다른 축제 이름이 없어야 한다. 남는 것: 「축제」 낱말이 없는 이웃 행사(「선농제향」)가 사이에 끼면 가려내지 못한다."""
+    if not re.fullmatch(_EDGE_YEAR, year or ""):
+        return False
+    body = "\n".join(_body_lines(page))
+    spans = [(m.start(), m.end()) for p in _name_patterns(name, True, year) for m in p.finditer(body)]
+    own = [c for _, c in _name_cands(name, True, year)]
+    for d in _festival_dates(body, year, strict=True):
+        prev = max((e for _, e in spans if e <= d.start()), default=None)
+        if prev is not None and d.start() - prev <= S4_DATE_AFTER_NAME and not _other_festival_in(body[prev:d.start()], own):
+            return True
+        nxt = min((a for a, _ in spans if a >= d.end()), default=None)
+        if nxt is not None and nxt - d.end() <= S4_DATE_BEFORE_NAME and not _other_festival_in(body[d.end():nxt], own):
+            return True
+    return False
+
+
+# ---- S4 「기관 소개」 (2026-11-25 공작 결정) ----
+# 자치구 축제는 제 사이트가 없는 것이 보통이다 — 구청 문화관광 사이트 · 서울시 문화포털 · 문체부 지역축제의 「그 축제 하나를 소개하는 쪽」 을
+# 홈페이지로 받는다. 첫 화면이 아닌 깊은 쪽에만 서고, 값은 origin 이 아니라 그 쪽의 URL 이다. S1 ~ S3 는 그대로다.
+# 받지 않는 것: 구청 첫 화면(어느 축제의 것도 아니다) · 뉴스(mediahub — 기사다) · 게시판 글 · 목록 · 검색 결과.
+S4_NEWS_HOSTS = ("mediahub.seoul.go.kr", "news.seoul.go.kr")
+# 리뷰(agy 5) — 호스트 낱말은 붙어 다닌다(「gnews」 · 「enews」 · 「newsroom」 · 「pressroom」). 부분 문자열로 본다
+_S4_NEWS_LABEL = re.compile(r"news|press|media|blog|webzine|bodo|^tv\d*$")
+_S4_PATH_WORDS = re.compile(r"bbs|board|brd|notice|news|press|bodo|article|list|search|archives", re.I)
+_S4_QUERY_KEYS = re.compile(r"bbs|board|ntt|search|srch|keyword|kwd|query", re.I)
+_S4_QUERY_KEYS_EXACT = {"q", "page", "pageindex", "pageno", "pagenum", "currentpage", "cpage", "pg"}   # 통째로 같을 때만(「pgmId」 는 아니다)
+_S4_QUERY_VALUES = re.compile(r"(?:bbs|board|notice|list|search|news|press)[a-z0-9_]*|[a-z0-9_]*(?:list|board|bbs)")
+S4_MAX_QUERY_PIECES = 6                       # 리뷰(agy 6) — 질의는 남의 글이다. 소개 쪽의 질의는 번호 몇 개다
+S4_MAX_QUERY_PIECE_CHARS = 48
+S4_MAX_OTHER_FESTIVALS = 3                    # 그 이름만큼 나오는 다른 축제 이름이 이만큼이면 목록이다
+S4_MAX_OTHER_DATES = 3                        # 대상 이름이 없는 줄의 그 해 날짜가 이만큼(서로 다른 날)이면 목록이다
+_FEST_PHRASE = re.compile(r"(?:[가-힣a-z0-9]+ ){0,3}[가-힣a-z0-9]*" + _FEST_WORD)
+
+
+def s4_url_problem(url: str) -> Optional[str]:
+    """S4 로 받지 않는 URL 꼴 — 뉴스 호스트 · 게시판 · 공지 · 목록 · 검색 · 세션 꼴 열쇠 · 긴 질의. 없으면 None.
+    경로는 낱말이 붙어 다녀서(「selectBbsNttList.do」 · 「boardview」) 부분 문자열로 본다 — 닫힌 쪽으로 틀린다."""
+    try:
+        parts = urlsplit(url or "")
+        host = (parts.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return "BAD_URL"
+    if _host_in(host, S4_NEWS_HOSTS) or any(_S4_NEWS_LABEL.search(x) for x in host.split(".")[:-2]):
+        return "NEWS_HOST"
+    if _S4_PATH_WORDS.search(unquote(unquote(parts.path or ""))):       # 「/%62oard/」 — 퍼센트 부호를 풀고 본다
+        return "BOARD_OR_LIST_PATH"
+    pieces = [piece for _, piece in _query_pieces(parts.query)]
+    for piece in pieces:
+        key = _query_key(piece)
+        value = unquote(piece.split("=", 1)[1]).strip().lower() if "=" in piece else ""
+        if _S4_QUERY_KEYS.search(key) or key in _S4_QUERY_KEYS_EXACT or _S4_QUERY_VALUES.fullmatch(value):
+            return "BOARD_OR_LIST_QUERY"                                # 「?mode=list」 · 「?menu=board」 — 값도 본다
+    if any(_query_key(piece) in SESSION_LIKE_KEYS for piece in pieces):
+        return "SESSION_QUERY"
+    if len(pieces) > S4_MAX_QUERY_PIECES or any(len(piece) > S4_MAX_QUERY_PIECE_CHARS for piece in pieces):
+        return "QUERY_TOO_LONG"
+    return None
+
+
+def other_festival_names(name: str, page: PageText, year: str = "") -> List[str]:
+    """본문에서 대상 이름만큼(또는 더 자주) 나오는 다른 축제 이름들. 소개 쪽의 차림에도 이웃 축제가 실리지만(실제 ddm.go.kr —
+    네 개가 두 번씩) 그 쪽에서는 대상 이름이 훨씬 자주 나온다. 목록에서는 모두 같은 횟수로 나온다.
+    리뷰(agy 3) — 앞 낱말만 다른 표기(「청룡문화제」 · 「5월 전통 청룡문화제」)는 한 이름으로 센다: 뒤쪽 낱말 묶음마다 센다."""
+    body = normalize_lines(page.text)
+    own = [c for _, c in _name_cands(name, True, year)] + [_compact(core_name(name or "", year))]
+    mine = max([1] + [len(p.findall(body)) for p in _name_patterns(name, True, year)])
+    seen: Dict[str, int] = {}
+    for line in body.split("\n"):
+        for m in _FEST_PHRASE.finditer(line):
+            words = m.group(0).split(" ")
+            for i in range(len(words)):
+                key = _compact("".join(words[i:]))
+                if len(key) < CORE_NAME_MIN_CHARS or any(o in key or key in o for o in own if o):
+                    continue
+                seen[key] = seen.get(key, 0) + 1
+    hit = [k for k, n in seen.items() if n >= mine]
+    return [k for k in hit if not any(o != k and k.endswith(o) for o in hit)]      # 긴 표기는 짧은 것에 합친다
+
+
+def other_dated_lines(name: str, page: PageText, year: str) -> int:
+    """리뷰(fable 6) — 대상 이름이 없는 줄에 실린 그 해 날짜의 가짓수. 이웃 행사 이름에 「축제」 가 없어도 날짜 달린 줄이
+    여럿이면 목록이다. 쪽 자체의 날짜 · 모집 날짜가 든 줄은 세지 않는다. 닫힌 쪽으로 틀린다 — 사전 행사 · 부대 행사의
+    날짜를 줄마다 적은 소개 쪽은 목록으로 읽힐 수 있다."""
+    if not re.fullmatch(_EDGE_YEAR, year or ""):
+        return 0
+    pats = _name_patterns(name, True, year)
+    loose = re.compile(rf"(?<!\d){re.escape(year)}\s*[.\-/년]\s*(\d{{1,2}})\s*[.\-/월]\s*(\d{{1,2}})")
+    days = set()
+    prev = ""
+    for line in normalize_lines(page.text).split("\n"):
+        # 표의 앞 칸(「참가 접수」 · 「최종 수정」)은 앞줄에 있다 — 짧은 앞줄도 같이 본다
+        label = line + " " + (prev if len(prev) <= 20 else "")
+        prev = line
+        if any(p.search(line) for p in pats) or _NOT_FESTIVAL_DATE.search(label) or _PAGE_DATE.search(label):
+            continue
+        m = loose.search(line)                # 한 줄에서는 첫 날짜만 — 「2026. 4. 4. ~ 2026. 4. 5.」 는 하루다
+        if m:
+            days.add((int(m.group(1)), int(m.group(2))))
+    return len(days)
+
+
+_AREA_UNIT = re.compile(r"(?:특별자치시|특별자치도|광역시|특별시|시|군|구|도)$")
+
+
+def area_on_page(known: Dict[str, str], page: PageText) -> bool:
+    """리뷰(agy 2) — 지시서가 지역(known.area 「서울특별시 동대문구」)을 적었으면 그 마지막 낱말(「동대문」)이 쪽에 있어야 한다.
+    S4 는 전국의 .go.kr 깊은 쪽을 받으므로 같은 이름의 다른 지자체 축제를 여기서 거른다. 적지 않았으면 보지 않는다."""
+    words = normalize(str((known or {}).get("area") or "")).split(" ")
+    last = words[-1] if words else ""
+    if not last:
+        return True
+    stem = _AREA_UNIT.sub("", last)
+    return (stem if len(stem) >= 2 else last) in normalize(page.full() + "\n" + page.h1)
+
+
+def s4_problem(final_url: str, host: str, name: str, page: PageText, quote: str, signals: List[str],
+               year: str = "", known: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """기관 소개 쪽으로 받을 수 있으면 None, 아니면 이유 낱말(증거에 남긴다)."""
+    if not _host_in(host, (GOV_SUFFIX,)):
+        return "NOT_GOV_HOST"
+    url_problem = s4_url_problem(final_url)
+    if url_problem:
+        return url_problem
+    if not quote:                             # 제목 · 첫 h1 에 이름이 낱말째로(다른 연도가 붙어 있지 않게)
+        return "NAME_NOT_IN_TITLE"
+    if "DATES" not in signals:                # 그 해(known.year)의 축제 날짜 — 해마다 같은 글을 둔 쪽 · 지난해 쪽은 받지 않는다
+        return "NO_DATE_THIS_YEAR"
+    if not festival_date_near(name, page, year):          # 그 날짜가 본문의 그 이름 곁에 있다(리뷰 fable 1)
+        return "DATE_NOT_NEAR_NAME"
+    if not area_on_page(known or {}, page):
+        return "AREA_NOT_ON_PAGE"
+    if (len(other_festival_names(name, page, year)) >= S4_MAX_OTHER_FESTIVALS
+            or other_dated_lines(name, page, year) >= S4_MAX_OTHER_DATES):
+        return "LIST_PAGE"
+    return None
 
 
 def _port_key(parts) -> Optional[int]:
@@ -650,7 +962,7 @@ def _port_key(parts) -> Optional[int]:
     return None if port in (None, 80, 443) else port
 
 
-def _gov_link_source(host: str, name: str, final_url: str, gov_pages) -> str:
+def _gov_link_source(host: str, name: str, final_url: str, gov_pages, year: str = "") -> str:
     """S2 — 같은 수집에서 받은 .go.kr 페이지 가운데, 이 호스트(포트까지)로 건 링크가 있고 그 링크의 글이나 같은 행 · 항목에
     이름이 낱말째로 있는 것의 URL."""
     port = _port_key(urlsplit(final_url))
@@ -664,7 +976,7 @@ def _gov_link_source(host: str, name: str, final_url: str, gov_pages) -> str:
             except ValueError:
                 continue
             if (_bare((target.hostname or "").lower()) == _bare(host) and _port_key(target) == port
-                    and _name_whole_in(name, context)):
+                    and _name_whole_in(name, context, year)):
                 return src_url
     return ""
 
@@ -675,10 +987,11 @@ class OfficialDecision:
     value: str = ""
     reason_code: Optional[str] = None
     detail: str = ""                          # 사람이 볼 때의 사유 낱말(코드가 정한 것)
-    match_rule: Optional[str] = None          # S1 · S1D · S2 · S3 · exact(지시서의 official_domain)
+    match_rule: Optional[str] = None          # S1 · S1D · S2 · S3 · S4(기관 소개) · exact(지시서의 official_domain)
     quote: str = ""                           # 이름이 든 제목 · h1 — 페이지 글이다. 증거 jsonl 에만 남긴다
     signals: List[str] = field(default_factory=list)
     link_source: str = ""                     # S2 — 링크를 건 .go.kr 페이지
+    s4_blocker: str = ""                      # 깊은 쪽이 S4 로 받아지지 않은 이유(NO_DATE_THIS_YEAR · LIST_PAGE …)
 
 
 def decide_official_url(requested_url: str, final_url: str, known: Dict[str, str], page: PageText, domains: Domains,
@@ -698,20 +1011,28 @@ def decide_official_url(requested_url: str, final_url: str, known: Dict[str, str
         return OfficialDecision("rejected", reason_code="NOT_OFFICIAL_HOST")
     if len(_compact(name)) < MIN_NAME_CHARS:
         return OfficialDecision("rejected", reason_code="NAME_TOO_SHORT")
-    if not _name_in(name, page.full() + "\n" + page.h1):
+    if not _name_in(name, page.full() + "\n" + page.h1, year):
         return OfficialDecision("rejected", reason_code="NAME_NOT_ON_PAGE")
     home = is_home_page(requested_url, final_url)
-    deep = normalize_url(f"{origin}{parsed[3]}")
+    deep = clean_url(f"{origin}{parsed[3]}")              # 받은 그대로 — 추적 · 세션 열쇠만 뺀다(리뷰 fable 4)
     shaped = len(deep) <= URL_MAX_CHARS and _URL_CHARS.fullmatch(deep) is not None
     value = origin if home or not shaped else deep
-    quote = next((x for x in (page.title, page.h1) if x and _name_whole_in(name, x)), "")[:300]
+    kinds = [(x, title_name_kind(name, x, year)) for x in (page.title, page.h1) if x]
+    quote = next((x for x, k in kinds if k), "")[:300]
+    # 리뷰(fable 2) — 연도 · 회차를 뗀 이름으로만 맞았는가. 그러면 S1 도 그 해의 날짜가 이름 곁에 있어야 한다
+    core_only = bool(quote) and not any(k == "full" for _, k in kinds)
     signals = official_signals(page, year)
     base = dict(value=value, quote=quote, signals=signals)
     od = (known.get("official_domain") or "").strip().lower().rstrip(".")
     if od and not is_public_suffix(od) and _host_in(host, (od,)):         # 지시서가 적은 도메인 — 예전 규칙 그대로
         return OfficialDecision("accepted", match_rule="exact", **base)
     if not home:
-        return OfficialDecision("unverifiable", reason_code="NEEDS_HUMAN_REVIEW", detail="NOT_HOME_PAGE", **base)
+        # S4 「기관 소개」 — .go.kr 의 깊은 쪽이 그 축제 하나를 소개한다. 값은 그 쪽의 URL(다듬은 것)이다
+        blocker = s4_problem(final_url, host, name, page, quote, signals, year, known) or ("" if shaped else "URL_NOT_PLAIN")
+        if not blocker:
+            return OfficialDecision("accepted", match_rule="S4", **base)
+        return OfficialDecision("unverifiable", reason_code="NEEDS_HUMAN_REVIEW", detail="NOT_HOME_PAGE",
+                                s4_blocker=blocker, **base)
     if on_free_hosting(host):                 # 누구나 만드는 하위 이름 — 글이 그럴듯해도 자동으로 받지 않는다
         return OfficialDecision("unverifiable", reason_code="NEEDS_HUMAN_REVIEW", detail="FREE_HOSTING", **base)
     # 강한 신호는 전부 「제목 · 첫 h1 에 이름이 낱말째로 있다」 위에 선다(리뷰 fable 2 — S2 도 그렇다)
@@ -719,10 +1040,12 @@ def decide_official_url(requested_url: str, final_url: str, known: Dict[str, str
         return OfficialDecision("unverifiable", reason_code="NEEDS_HUMAN_REVIEW", detail="NAME_NOT_IN_TITLE", **base)
     gov = _host_in(host, (GOV_SUFFIX,))
     if gov:
+        if core_only and not festival_date_near(name, page, year):
+            return OfficialDecision("unverifiable", reason_code="NEEDS_HUMAN_REVIEW", detail="STRIPPED_NAME_NEEDS_DATE", **base)
         return OfficialDecision("accepted", match_rule="S1", **base)
     if _host_in(host, PUBLIC_DOMAIN_SUFFIXES) and "DATES" in signals:
         return OfficialDecision("accepted", match_rule="S1D", **base)
-    src = _gov_link_source(host, name, final_url, gov_pages)      # 받는 쪽이 .go.kr 이면 여기 오지 않는다(S1 이다)
+    src = _gov_link_source(host, name, final_url, gov_pages, year)      # 받는 쪽이 .go.kr 이면 여기 오지 않는다(S1 이다)
     if src:
         return OfficialDecision("accepted", match_rule="S2", link_source=src, **base)
     if "DATES" in signals and len(signals) >= 2:                  # 그 해의 축제 날짜 + 하나 더

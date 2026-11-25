@@ -64,11 +64,18 @@ class BaseHead(ABC):
         '"required_outputs": string[], "reference_paths": string[], "allowed_deletions": string[], '
         '"max_files_changed": integer, "max_diff_lines": integer, "context": string, '
         '"risk_level": "LOW"|"MEDIUM"|"HIGH", "requires_human_approval": false, "collect": null | {"targets": '
-        '[{"id": "t1", "known": {"name": string, "area": string, "sido": string}, "fields": '
+        '[{"id": "t01", "known": {"name": string, "area": string, "sido": string, "ref": string, "year": "YYYY"}, "fields": '
         '["address"|"official_url"|"status"], "query_hint": string, "urls": string[]}], "output": {"schema": '
         '"steak-sources-v1"|"generic-claims-v1", "path": "relative/new-file.csv"}}}. '
         'allowed_deletions entries are repo-relative file paths or symbols as "def:name" / "class:name" '
-        '(not pytest node ids).'
+        '(not pytest node ids). '
+        # 포크(2026-11-25 실측): HEAD 가 한글 id 를 써 COLLECT_ORDER_REJECTED, 앞 미션이 남긴 파일 이름을 다시 써 COLLECT_OUTPUT_EXISTS
+        'collect.targets[].id must be ASCII only, matching ^[A-Za-z0-9._-]{1,64}$ (e.g. "t01", "t02") - never Korean '
+        'text or the project\'s own record key; put the real name in known.name (required) and the project\'s own '
+        'key/id in known.ref (known values are strings, max 200 chars; known.year is the target year). '
+        'collect.output.path must not exist yet in the project (an earlier step or mission may have left a file '
+        'there, which stops the step with COLLECT_OUTPUT_EXISTS): always use a new name with a batch suffix such as '
+        '"data/homepages_web_2026_batch02.csv".'
     )
 
     def proxy_decide(self, question: str, evidence: Dict[str, Any], cwd: Optional[str] = None) -> Dict[str, Any]:
@@ -110,7 +117,9 @@ class BaseHead(ABC):
             "and only rows it verified against the fetched text are written to collect.output.path (a NEW .csv inside "
             "allowed_paths, not protected) before the Builder runs. Each step result carries \"collection\" counts "
             "(accepted / rejected / unverifiable); zero accepted rows means the file was not created. Never ask the "
-            "Builder to invent such data.\n"
+            "Builder to invent such data. Target ids are ASCII (t01, t02 ...; the real key goes in known.ref) and "
+            "collect.output.path is a file that does not exist yet - a path used by an earlier step or mission stops "
+            "with COLLECT_OUTPUT_EXISTS, so add a new batch suffix each time.\n"
             "Before you answer, check your ORDER against itself: every file in required_outputs must be inside "
             "allowed_paths and must NOT match protected_paths (a wildcard such as data/*.json also protects a new "
             "data/x.json).\n\n"

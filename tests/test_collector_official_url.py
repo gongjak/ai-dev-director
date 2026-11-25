@@ -62,11 +62,14 @@ def test_real_travel_portal_page_is_rejected():
 
 
 def test_city_hall_deep_page_does_not_make_the_city_origin_official():
-    """실제 사례 — suwon.go.kr 의 축제 소개 쪽은 제목에 이름이 있고 .go.kr 이지만, origin 은 시청이지 축제 사이트가 아니다."""
+    """실제 사례 — suwon.go.kr 의 축제 소개 쪽은 제목에 이름이 있고 .go.kr 이지만, origin 은 시청이지 축제 사이트가 아니다.
+    2026-11-25 공작 결정(S4 「기관 소개」) 뒤 — 그 해 날짜가 있는 이 쪽은 받는다. 값은 여전히 시청 origin 이 아니라 그 쪽이다.
+    그 해 날짜가 없으면(지난해 대상) 예전처럼 후보다."""
     url = "https://www.suwon.go.kr/sw-www/sw-visitsuwon/sw-visitsuwon-03/sw-visitsuwon-03-01.jsp"
     v = decide(url, "수원화성문화제", saved("suwon_hwaseong"))
-    assert (v.outcome, v.reason_code, v.detail) == ("unverifiable", "NEEDS_HUMAN_REVIEW", "NOT_HOME_PAGE")
-    assert v.value == url                                    # 후보는 시청 origin 이 아니라 그 쪽이다
+    assert (v.outcome, v.match_rule, v.value) == ("accepted", "S4", url)
+    old = decide(url, "수원화성문화제", saved("suwon_hwaseong"), year="2024")
+    assert (old.outcome, old.reason_code, old.detail, old.value) == ("unverifiable", "NEEDS_HUMAN_REVIEW", "NOT_HOME_PAGE", url)
 
 
 def test_news_article_mentioning_the_name_is_not_accepted():
