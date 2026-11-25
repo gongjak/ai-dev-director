@@ -5,22 +5,46 @@
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 import traceback
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import urljoin, urlsplit
 
 from core.collector import outputs
 from core.collector.netfetch import Fetcher, precheck, strip_fragment
 from core.collector.order import OrderError, load_order
 from core.collector.providers import CallFailed, HaikuCollector, LlmBudgetExhausted, ProviderFatal, report_health
-from core.collector.verify import conflict_keys, extract_text, road_key, verify_claim
+from core.collector.verify import GOV_SUFFIX, conflict_keys, decide_official_url, extract_text, road_key, verify_claim
 from core.env_utils import collector_model_args
 
 
 def _rec(target_id: str, field: str, source_url: Optional[str], reason: str, **extra) -> dict:
     return {"target_id": target_id, "field": field, "source_url": source_url, "reason_code": reason, **extra}
+
+
+OFFICIAL = "official_url"                  # 이 필드는 LLM 에 묻지 않는다 — 코드가 판정한다(설계 §6.4)
+
+
+def target_year(known: dict, requested_at_kst: str) -> str:
+    """S3 의 대상 연도 — known.year 가 네 자리 연도면 그것, 아니면 지시서를 낸 해."""
+    y = str((known or {}).get("year") or "").strip()
+    return y if re.fullmatch(r"(?:19|20)\d\d", y) else requested_at_kst[:4]
+
+
+def _llm_view(target):
+    """LLM 에 보이는 대상 — official_url 을 뺀 fields. 남는 필드가 없으면 None."""
+    rest = [f for f in target.fields if f != OFFICIAL]
+    return target.model_copy(update={"fields": rest}) if rest else None
+
+
+def _link_host(base_url: str, href: str) -> str:
+    try:
+        return (urlsplit(urljoin(base_url, href)).hostname or "").lower()
+    except ValueError:
+        return ""
 
 
 def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
@@ -51,6 +75,9 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
     urls_tried = 0
     claims_dropped = 0
     tried: Dict[tuple, bool] = {}            # (target_id, field) → 페이지를 하나라도 읽었는가
+    official_pages: List[tuple] = []         # (대상, 청한 URL, 최종 URL, PageText, sha) — 다 받은 뒤에 판정한다
+    gov_pages: List[tuple] = []              # 같은 수집에서 받은 .go.kr 페이지 (최종 URL, PageText) — S2 의 링크 출처
+    page_index: List[dict] = []
 
     # ① URL 찾기 — 주어진 urls 가 있으면 그대로
     url_targets: Dict[str, list] = {}
@@ -84,9 +111,14 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
 
     # ②~⑤ 받기 → 추출 → 같은 본문에 대조
     for url, targets in url_targets.items():
-        if provider.fatal or provider.calls_made >= lim.max_llm_calls:
-            not_attempted.extend(t.id for t in targets if t.id not in not_attempted)
-            continue
+        llm_targets = [v for v in map(_llm_view, targets) if v is not None]
+        llm_blocked = bool(provider.fatal or provider.calls_made >= lim.max_llm_calls)
+        if llm_blocked:
+            not_attempted.extend(t.id for t in llm_targets if t.id not in not_attempted)
+            llm_targets = []
+            # 공식 URL 만 묻는 대상은 LLM 한도와 무관하다 — 받기만 하면 판정한다
+            if not any(OFFICIAL in t.fields for t in targets):
+                continue
         urls_tried += 1
         try:
             res = fetcher.fetch(url)
@@ -109,16 +141,29 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
             titles[res.final_url] = page.title
             if len(full) > lim.max_page_chars:
                 truncated_pages += 1
+            fin_host = (urlsplit(res.final_url).hostname or "").lower()
+            page_index.append({"requested_url": url, "final_url": res.final_url, "page_sha256": sha,
+                               "title": page.title[:300], "h1": page.h1,
+                               "link_hosts": sorted({h for h in (_link_host(res.final_url, x) for x, _ in page.links)
+                                                     if h and h != fin_host})[:200]})
+            if fin_host == GOV_SUFFIX or fin_host.endswith("." + GOV_SUFFIX):
+                gov_pages.append((res.final_url, page))
+            for t in targets:
+                if OFFICIAL in t.fields:
+                    official_pages.append((t, url, res.final_url, page, sha))
+            if not llm_targets:
+                continue
             try:
-                raw_claims = provider.extract_claims(targets, full[:lim.max_page_chars])
+                raw_claims = provider.extract_claims(llm_targets, full[:lim.max_page_chars])
             except (ProviderFatal, LlmBudgetExhausted):
-                not_attempted.extend(t.id for t in targets if t.id not in not_attempted)
+                not_attempted.extend(t.id for t in llm_targets if t.id not in not_attempted)
                 continue
             except CallFailed as exc:
-                for t in targets:
+                for t in llm_targets:
                     for f in t.fields:
                         unverifiable.append(_rec(t.id, f, res.final_url, "EXTRACT_FAILED", detail=str(exc)))
                 continue
+            targets = llm_targets                # 아래 대조는 LLM 에 물은 필드만 본다 — official_url 주장은 버린다
             by_id = {t.id: t for t in targets}
             for t in targets:
                 for f in t.fields:
@@ -160,6 +205,29 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
                     unverifiable.append(_rec(t.id, f, url, "INTERNAL_ERROR",
                                              detail=f"{type(exc).__name__}: {exc}"[:300]))
 
+    # ⑧-2 공식 URL — 받은 페이지를 다 모은 뒤 코드가 판정한다(§6.4). 값은 최종 URL 의 origin 이고 LLM 은 부르지 않는다
+    official_seen = set()
+    for t, req_url, final_url, page, sha in official_pages:
+        if (t.id, final_url) in official_seen:               # 두 URL 이 같은 곳으로 넘어갔다
+            continue
+        official_seen.add((t.id, final_url))
+        d = decide_official_url(req_url, final_url, t.known, page, order.domains,
+                                target_year(t.known, order.requested_at_kst), gov_pages)
+        claim = {"target_id": t.id, "field": OFFICIAL, "value": d.value or None, "quote": d.quote,
+                 "source_url": final_url, "page_sha256": sha, "provider": "code", "call_no": None,
+                 "received_at_kst": outputs.now_iso()}
+        claims.append(claim)
+        row = {**claim, "reason_code": d.reason_code, "match_rule": d.match_rule, "signals": d.signals}
+        if d.outcome == "accepted":
+            if d.link_source:
+                row["link_source_url"] = d.link_source
+            claims[-1]["verdict"] = "accepted"
+            claims[-1]["_row"] = row
+        elif d.outcome == "unverifiable":                    # 후보 — 사람이 본다(candidates.csv)
+            unverifiable.append({**row, "detail": d.detail})
+        else:
+            rejected.append(row)
+
     # ⑨ 모순 · 중복 정리
     acc_rows = [c.pop("_row") for c in claims if "_row" in c]
     conflicts = conflict_keys(acc_rows)
@@ -179,8 +247,9 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
         if key not in claimed:
             unverifiable.append(_rec(key[0], key[1], None, "NOT_EXTRACTED"))
 
-    header, rows = outputs.build_rows(order.output.schema_name, order.targets, accepted, titles,
-                                      outputs.now_kst().date().isoformat())
+    checked = outputs.now_kst().date().isoformat()
+    header, rows = outputs.build_rows(order.output.schema_name, order.targets, accepted, titles, checked)
+    candidates = outputs.candidate_rows(accepted, unverifiable, checked)
     failed = provider.calls_made > 0 and provider.successes == 0
     # 앞에서 성공했어도 중간에 한도 · 인증 오류로 멈췄으면 남은 일을 버린 것이다 — 정상(0)으로 끝내지 않는다
     partial = (bool(provider.fatal) or internal_errors > 0) and not failed
@@ -197,7 +266,7 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
             "INTERNAL_FAILURE" if internal_failure else ("PARTIAL" if partial else "OK")),
         "internal_errors": internal_errors,
         "targets": len(order.targets), "claims": len(claims), "claims_dropped": claims_dropped,
-        "accepted": len(accepted), "rows": len(rows),
+        "accepted": len(accepted), "rows": len(rows), "candidates": len(candidates),
         "rejected": len(rejected), "unverifiable": len(unverifiable),
         "reason_codes": outputs.reason_counts(rejected, unverifiable),
         "fetch_requests": fetcher.requests_made, "requests_per_host": hosts,
@@ -208,7 +277,7 @@ def run_collect(order_path, out_dir, *, fetcher: Optional[Fetcher] = None,
     outputs.write_all(base, order_json=order.model_dump(by_alias=True), header=header, rows=rows, accepted=accepted,
                       rejected=rejected, unverifiable=unverifiable, claims=claims, raw=provider.raw_log,
                       llm_calls=provider.calls_log, fetch_log=fetcher.log, pages=pages, robots=fetcher.robots_texts,
-                      summary=summary)
+                      summary=summary, candidates=candidates, page_index=page_index)
     return (2 if failed or partial else 0), summary
 
 

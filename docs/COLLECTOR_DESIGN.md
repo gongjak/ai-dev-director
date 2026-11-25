@@ -129,7 +129,8 @@ source: claude
 | `purpose` | 사람 · HEAD 가 읽는 한 줄 | `owner_policy.hard_stop_reasons()`(`core/owner_policy.py:76-79`)에 걸리면 거부 |
 | `targets[]` | 모을 대상 | 1 ~ `limits.max_targets` 개 · `id` 유일 |
 | `targets[].known` | 이미 아는 값 — 이름 · 동네 · 시도 · 분류 | 문자열 ≤ 200자 · 제어문자 금지 · **`name` 필수**(비면 지시서 거부 — 이름 근접 대조에 쓴다) |
-| `targets[].known.official_domain` | 선택 — 그 대상의 공식 사이트 도메인 | 있을 때만 `official_url` 을 받는다(§6.2). 없으면 공식 URL 후보는 `unverifiable(NEEDS_HUMAN_REVIEW)` |
+| `targets[].known.official_domain` | 선택 — 그 대상의 공식 사이트 도메인 | 있으면 그 호스트(하위 도메인 포함)를 바로 받는다(`match_rule` `exact`). **없어도 된다** — 2026-11-25 부터 §6.4 의 자동 판정(S1 · S1D · S2 · S3)이 돈다 |
+| `targets[].known.year` | 선택 — 대상 연도(네 자리) | §6.4 S3 의 「그 해 날짜 · 프로그램」을 볼 연도. 없으면 지시서 `requested_at_kst` 의 해 |
 | `targets[].fields` | 모을 항목 | `address` · `official_url` · `status` 중에서. v1 은 이 셋뿐 |
 | `targets[].query_hint` | 검색어 제안 | ≤ 200자. 비면 `known` 으로 만든다 |
 | `targets[].urls` | 사람 · HEAD 가 아는 출처 URL | 선택 · ≤ `max_urls_per_target` 개. **있으면 URL 찾기 호출을 하지 않는다** |
@@ -215,6 +216,7 @@ TARGETS: [...]
 | `--model haiku` | `collector_model_args()` — sonnet 이면 예외 |
 
 - `source_url` 은 **코드가** 받은 최종 URL 로 붙인다. 모델이 URL 을 말할 자리가 없다
+- **`official_url` 은 이 호출에 넣지 않는다**(2026-11-25) — `fields` 에서 빼고 보낸다. 대상의 필드가 `official_url` 뿐이면 그 페이지에는 LLM 을 부르지 않는다. 모델이 그래도 `official_url` 주장을 내면 `rejected(FIELD_NOT_REQUESTED)` 다. 판정은 §6.4
 - 대상 값(`known.*`)은 200자 · 제어문자 검사를 거친 뒤 넣는다
 
 ## 5. 주장(claim) 형식
@@ -226,7 +228,7 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 | `target_id` | 지시서의 `targets[].id` | 모르는 id 면 그 주장은 `rejected(UNKNOWN_TARGET)` |
 | `field` | `address` · `official_url` · `status` | 지시서 `fields` 에 있는 것만 |
 | `value` | 주장 값 | 문자열 1~500자 · 제어문자 없음 · `null` 이면 `rejected(NO_VALUE)` 로 기록만 |
-| `source_url` | 출처 URL — **코드가 붙인다**(받은 최종 URL) | 모델 출력의 URL 은 쓰지 않는다. `official_url` 은 `value` 가 그 URL 과 같아야 한다 |
+| `source_url` | 출처 URL — **코드가 붙인다**(받은 최종 URL) | 모델 출력의 URL 은 쓰지 않는다. `official_url` 은 주장 자체를 코드가 만든다 — `value` 는 최종 URL 의 origin, `provider` 는 `code`, `quote` 는 이름이 든 제목 · h1(§6.4) |
 | `quote` | 값이 들어 있는 원문 발췌 ≤ 300자 | 참고용. 대조에는 `value` 만 쓴다 |
 | `provider` · `call_no` · `received_at_kst` | Director 가 붙인다 | — |
 
@@ -260,7 +262,7 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 | 필드 | 규칙 A(정확) | 규칙 B(토큰) | 받아들임 |
 |---|---|---|---|
 | `address` | 값에 도로명 + 건물번호 또는 동 · 리 + 지번이 있어야 한다(없으면 `ADDRESS_TOO_VAGUE`). 정규화한 값이 정규화한 본문의 **부분 문자열**이고, 값이 숫자로 끝나면 본문의 바로 뒤가 숫자 · 「-숫자」가 아니어야 한다(「회나무로4」는 「회나무로 49」에, 「회나무로 49」는 「회나무로 49-1」에, 「이태원동 211」은 「211-33」에 맞지 않는다). **맞은 자리 앞뒤 400자 안에 `known.name` 이 있어야 한다** — 공백 · 문장부호를 빼고 대소문자 없이 비교(「구스테이크 528」 = 「구스테이크528」). 끝의 괄호 지점명을 뗀 이름(「울프강 스테이크하우스(청담점)」 → 「울프강 스테이크하우스」)으로도 찾는다. 없으면 `NAME_NOT_NEAR_VALUE` | 값의 토큰(공백 단위 · 괄호 토큰 포함)이 **전부** 본문에 순서대로 있고, **토큰 사이에는 공백 · 문장부호만** 있다(글자 · 숫자가 끼면 안 된다) · 연속 200자 창 안 | A 또는 B. 증거에 `match_rule: "exact"|"tokens"` 를 남긴다 |
-| `official_url` | `value` 를 받았을 때 2xx · 본문에 정규화한 `known.name` 이 부분 문자열로 있음 · 호스트가 `deny` 아님 · 포털 · 지도 · 블로그 · SNS 호스트 아님(`blog.naver.com` · `instagram.com` · `facebook.com` · `tistory.com` 등 고정 목록) · **호스트가 그 대상의 `known.official_domain`(또는 하위 도메인)** | 없음 | A 만. 앞의 조건을 다 지나도 `official_domain` 이 없거나 다르면 `unverifiable(NEEDS_HUMAN_REVIEW)` — 블랙리스트에 없다는 것은 공식이라는 증거가 아니다. 후보 값은 사람이 보도록 그 행에 남긴다 |
+| `official_url` | `value` 를 받았을 때 2xx · 본문에 정규화한 `known.name` 이 부분 문자열로 있음 · 호스트가 `deny` 아님 · 포털 · 지도 · 블로그 · SNS 호스트 아님(`blog.naver.com` · `instagram.com` · `facebook.com` · `tistory.com` 등 고정 목록) · **호스트가 그 대상의 `known.official_domain`(또는 하위 도메인)** | 없음 | **2026-11-25 부터 §6.4 로 판정한다** — 이 칸은 `verify_claim()` 의 옛 경로(값을 밖에서 받았을 때)이고 수집 실행은 쓰지 않는다. `official_domain` 이 맞으면 받는 것은 §6.4 에서도 같다 |
 | `status` | 본문에 `폐업` · `영업 종료` · `영구 폐점` · `closed permanently` 중 하나가 **`known.name` 앞뒤 400자 안에** 있고, **폐업했다는 말이어야 한다** — 낱말 뒤 문장 끝(최대 12자)까지에 숫자(「영업 종료 22:00」 마감 시각) · 부정(아니 · 아님 · 않) · 단추 · 질문 꼴(신고 · 제보 · 문의 · 여부 · `?`)이 있거나, 앞에 `not` · `no` · `never` 가 있으면 세지 않는다 → `closed` 로만 받는다 | 없음 | 「영업 중」은 **받아들이지 않는다** — 페이지가 살아 있다는 것이 영업의 증거가 아니다. §13 |
 
 - 규칙 B 를 둔 이유 — 페이지가 쉼표 · 가운뎃점 · 줄바꿈을 달리 넣는 일이 잦다. 처음에는 「토큰 전부 + 200자 창」이었으나 2차 리뷰(2026-11-09)에서 **두 가게의 주소를 꿰매는** 것이 드러났다(「강남점 서울 강남구 테헤란로 10 / 마포점 서울 마포구 독막로 1」에서 「서울 강남구 독막로 1」 수락). 그래서 토큰 사이에 글자 · 숫자가 끼면 맞지 않는 것으로 좁혔다 — 「… 122-1 A동 지하2층」 을 「122-1 지하2층」 으로 줄인 값은 이제 거부된다(틀린 값보다 놓친 값이 낫다)
@@ -279,6 +281,73 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 | `accepted` | 출처를 다시 받아 값이 실제로 있었다 | `accepted.csv` |
 | `rejected` | 주장이 틀렸거나 정책 위반 — 재시도해도 같다 | `rejected.jsonl` |
 | `unverifiable` | 지금은 확인할 수 없다 — 차단 · robots · 크기 · 모순 · 공식 여부(`NEEDS_HUMAN_REVIEW`) · 한 URL 처리 중 뜻밖의 오류(`INTERNAL_ERROR` — 실행은 이어가고 산출물을 쓴다). **값이 맞을 수도 있지만 받아들이지 않는다** | `unverifiable.jsonl` |
+
+### 6.4 공식 URL 자동 판정 — LLM 없이 코드가 정한다 (2026-11-25 공작 결정)
+
+**왜 바꿨나** — 실제 수집 `runs/RUN-261125163703-…/collect`(축제 20곳 · `official_url`)이 받은 행 0 으로 끝났다. 원인이 둘이었다.
+
+| 원인 | 실측 |
+|---|---|
+| 추출 프롬프트가 「URL 을 페이지 글에서 그대로 베껴라」였다 | 첫 화면에는 제 URL 이 적혀 있지 않다 — 16건이 `{"claims":[]}` → `NOT_EXTRACTED` |
+| 검증기가 `known.official_domain` 이 있어야만 받았다 | 공식 도메인을 찾으려는 수집인데 공식 도메인을 먼저 요구했다(순환) |
+
+**값** — Director 가 접속한 **최종 URL 의 origin**(`https://www.firefly.or.kr`)이다. 코드가 만들고 모델은 관여하지 않는다. 판정은 페이지를 다 받은 뒤에 한 번 한다(S2 가 다른 페이지를 본다). 구현은 `core/collector/verify.py` `decide_official_url()` · `core/collector/cli.py` ⑧-2.
+
+**기본 조건 — 전부 지나야 한다**
+
+| 조건 | 못 지나면 |
+|---|---|
+| 호스트가 `domains.deny` 가 아니다 | `rejected(DOMAIN_DENIED)` |
+| 호스트가 `NON_OFFICIAL_HOSTS`(포털 · 블로그 · SNS · 여행 안내 · 뉴스 · 대기열 · 기부 몰)가 아니고 공용 접미사(`or.kr` 자체 · 무료 호스팅 이름 `imweb.me` · `github.io` 자체 등)가 아니다 | `rejected(NOT_OFFICIAL_HOST)` |
+| 이름이 두 글자 이상이고, 공백 · 문장부호를 뺀 이름이 페이지(제목 · 본문 · h1)에 있다 | `rejected(NAME_TOO_SHORT)` · `rejected(NAME_NOT_ON_PAGE)` |
+| **받은 페이지가 그 사이트의 첫 화면이다** — 최종 경로가 루트(또는 `index` · `main` · `home` · `default`)이거나, 루트를 청했는데 같은 호스트 안에서 **두 단계까지 · 질의 없이** 넘어간 곳(`/` → `/intro/view`). 더 깊이 넘어간 곳(`/tour/festival/view.do`)은 첫 화면이 아니다 | `unverifiable(NEEDS_HUMAN_REVIEW · NOT_HOME_PAGE)` — 후보 값은 origin 이 아니라 그 쪽의 URL |
+| 호스트가 무료 호스팅 · 사이트 제작 서비스의 하위 이름(`*.imweb.me` · `*.github.io` · `*.cafe24.com` · `*.notion.site` 등 `FREE_HOSTING_SUFFIXES`)이 아니다 | `unverifiable(NEEDS_HUMAN_REVIEW · FREE_HOSTING)` — 지시서가 `official_domain` 으로 그 호스트를 적으면 받는다 |
+| **제목 또는 첫 `<h1>` 에 이름이 낱말째로 있다** — 앞뒤에 한글이 맞닿으면 다른 이름이다(「장미축제」 ↔ 「서울장미축제」 · 「장미축제추진위원회」). 숨긴 구역(`noscript` · `template`)의 h1 · `<svg><title>` · 닫지 않았거나 120자를 넘는 h1 은 제목이 아니다 | `unverifiable(NEEDS_HUMAN_REVIEW · NAME_NOT_IN_TITLE)` |
+
+- 첫 화면 조건은 공작이 정한 규칙에 **구현하면서 더한 것**이다. 실제 수집의 `www.suwon.go.kr/…/sw-visitsuwon-03-01.jsp` 가 제목 「수원화성문화제 : 수원관광 > 축제 > 수원화성문화제」 · `.go.kr` 이라 S1 을 그대로 지나고, 그러면 **시청 origin 이 축제 공식 사이트로** 놓인다. 뉴스 기사 · 대행사 실적 쪽도 같은 꼴이다
+- `NON_OFFICIAL_HOSTS` 는 받기 규칙(robots · 속도 · `DEFAULT_DENY`)을 바꾸지 않는다 — 받아서 읽되 공식 사이트로는 받지 않는다. `visitkorea.or.kr` 은 공공 관광 포털이라 `.or.kr` 이어도 여기 넣었다
+
+**강한 신호 — 하나 이상**
+
+| 규칙 | 조건 | 증거에 남는 것 |
+|---|---|---|
+| **S1** | 호스트가 `.go.kr` 아래다(`*.gb.go.kr` 포함) | `quote`(그 제목 · h1) |
+| **S1D** | 호스트가 `.or.kr` · `.re.kr` 아래다 **그리고** 신호 `DATES` 가 있다 — 이 두 이름은 등록 심사가 느슨해서 제목의 이름만으로는 받지 않는다 | `quote` · `signals` |
+| **S2** | 같은 수집에서 받은 `.go.kr` 페이지에 이 호스트(포트까지)로 건 `<a href>` 가 있고, **그 링크의 글이나 그 링크와 같은 표의 행(`tr`) · 목록 항목(`li`) 안(링크 앞뒤 300자까지)에 이름이 낱말째로 있다**(공백을 줄인 글로 잰다 · 호스트는 `www.` 를 떼고 견준다 · 자기 자신은 뺀다 · 받는 쪽이 `.go.kr` 이면 S1 이지 S2 가 아니다) | `link_source_url`(링크를 건 페이지) |
+| **S3** | 아래 셋 가운데 **`DATES` 를 포함해** 둘 이상 | `signals` |
+
+S3 의 신호는 전부 글자 대조다(`official_signals()`).
+
+| 신호 | 세는 것 | 세지 않는 것 |
+|---|---|---|
+| `DATES` | 대상 연도의 날짜 **범위**(「2026년 5월 1일 ~ 5월 10일」 — 뒤쪽에도 월 · 일이 있어야 한다) 또는 「기간 · 일시 · 일정 · 개최」 바로 뒤의 그 해 날짜 | 게시판 글 날짜(「2026.04.13」 · 「2026.04.13 - 1차 안내」) · 지난해 날짜 · 날짜 **앞 14자 · 뒤 14자** 안에 「모집 · 접수 · 신청 · 공모 · 응모 · 예매 · 등록 · 공고 · 마감 · 발표」가 있는 기간 · 숫자 속의 연도(「12026」) |
+| `ORGANIZER` | **줄 머리(또는 `\|` · `/` · `·` · `,` 뒤)의 「주최 :」 · 「주관 :」**(쌍점이 있어야 한다) 뒤 30자 안에 낱말째로 선 기관 이름 — 지자체(…시 · 군 · 구 · 도) · 재단 · 위원회 · 공사 · 문화원 · 협회 · 진흥원 · 시청 등 | 「주최 측에 문의하시기 바랍니다」 · 「주관적인 후기 … 반드시」 · 「주최 측과 무관하며 변동시」 · 그림뿐인 「주최 : \| 주관 :」 · 쌍점 없이 쓴 「주최 보령시」(놓친다). **남는 것** — 쌍점 바로 뒤에 홀로 선 「반드시 · 안내도 · 변동시 · 다시」 는 지명과 꼴이 같아 센다(「주최 : 반드시 확인」 — 실측) |
+| `PROGRAM` | 프로그램 · 일정 낱말 앞뒤 40자 안에 대상 연도가 수로 있다(앞뒤에 숫자가 없다) | 지난해 프로그램(「2019 프로그램」) · 「보안 · 제휴 · 설치 · 백신 프로그램」 · 영어 낱말의 일부(`programming`) · **제목 · h1 의 연도 + 본문의 낱말(리뷰 뒤 뺐다)** |
+
+- 하나도 없으면 `unverifiable(NEEDS_HUMAN_REVIEW · NO_STRONG_SIGNAL)` 이다
+- **값의 꼴** — origin 은 다듬은 호스트로 만든다(punycode · 끝 점 없음 · 기본이 아닌 포트는 남긴다). CSV 의 `source_url` 칸은 URL 글자만으로 된 200자 안의 URL 일 때만 그대로 싣고 아니면 origin 만 싣는다(`csv_url()` — 넘어간 곳의 URL 은 남이 고른 글이다)
+- S2 는 **받는 데 성공한** 사이트에만 쓴다 — TLS · robots 로 받지 못한 사이트는 시청이 링크해도 `unverifiable(ROBOTS_UNAVAILABLE …)` 그대로다
+- 한 대상에 받아들인 origin 이 둘이면 §6.2 와 같이 `CONFLICT` 로 둘 다 후보가 된다
+- `known.official_domain` 이 있고 호스트가 그 아래면 첫 화면이 아니어도 받는다(`match_rule` `exact` — 옛 규칙 그대로)
+
+**출처 기록** — 받은 행의 `match_rule` 은 `S1` · `S1D` · `S2` · `S3` 다(`accepted.csv` 의 `match_rule` 열 · `generic-claims-v1`). `quote` · `signals` · `link_source_url` · `page_sha256` 은 `accepted.jsonl` 에 남는다. **페이지를 쓴 사람의 글(제목 · h1)은 CSV 에 싣지 않는다** — CSV 는 Builder 프롬프트로 간다(4차 리뷰 E 와 같은 이유).
+
+**후보 파일** — 자동으로 받지 못한 후보(`NEEDS_HUMAN_REVIEW` · `CONFLICT`)는 본 파일에 섞지 않고 `candidates.csv` 에 따로 쓴다. 이미 받은 대상은 받은 값과 **같은 호스트**의 후보만 뺀다 — 다른 호스트의 후보는 남긴다(틀린 사이트를 받았을 때 진짜 사이트가 사람 눈에서 사라지지 않게). 열은 `target_id,field,value,source_url,reason_code,detail,signals,checked_at_kst` — 코드가 정한 낱말과 Director 가 접속한 URL 뿐이다. 2단계는 이것을 `collect.output.path` 옆 `<이름>_candidates.csv` 에 놓는다(§10.2).
+
+**2026-11-25 실행을 저장된 페이지로 다시 판정한 결과 — 리뷰 수정 뒤**(네트워크 없음 · 저장 글에는 h1 · 링크가 없어 **제목만으로 본 하한**이고 S2 는 재현하지 못한다)
+
+| 결과 | 수 | 대상 |
+|---|---|---|
+| 받음 | **0** | 리뷰 전에는 2 였다 — 무주반딧불(`.or.kr` · S1)과 문경찻사발(S3 `DATES` + `PROGRAM`). 둘 다 조인 규칙 위에 있었다 |
+| 후보(사람이 본다) | **9** | 보령머드 · 함평나비 · 자라섬재즈(`NAME_NOT_IN_TITLE`) · 진주남강유등 · 대구치맥 · 춘천마임 · **무주반딧불 · 문경찻사발**(`NO_STRONG_SIGNAL`) · 수원화성문화제(`NOT_HOME_PAGE`) |
+| 그 축제의 사이트를 받지 못함 | 6 | robots 금지 2(안동탈춤 · 금산인삼) · robots 를 받지 못함(TLS 등) 4(화천산천어 · 김제지평선 · 진해군항제 · 하동야생차) |
+| 포털 · 뉴스 쪽만 찾음 | 5 | 강경젓갈 · 영덕대게 · 담양대나무 · 이천쌀문화 · 보성다향(찾은 `wegive.co.kr` 은 기부 몰이고 robots 금지였다) |
+
+- **받음이 2 → 0 이 된 까닭** — 무주반딧불(`firefly.or.kr`)은 `.or.kr` 이라 이제 `DATES` 가 더 있어야 하는데 저장된 글의 올해 날짜는 게시판 글 날짜(「2026-08-11」)뿐이다. 문경찻사발(`sabal21.com`)은 `PROGRAM` 이 「제목에 연도 + 본문에 낱말」 갈래로만 섰고(그 갈래는 블로그 후기도 지난다 — 리뷰 fable 1) 주최 칸이 그림뿐이라 신호가 `DATES` 하나다. 둘 다 진짜 공식 사이트다 — 규칙을 다시 풀어 수를 맞추지 않았다. 받는 수를 올릴 자리는 S2(지자체 페이지의 링크 — 저장된 글로는 재현할 수 없다)와 URL 찾기 프롬프트다
+- 수원화성문화제는 축제 사이트(`shfestival.com`)를 TLS 로 받지 못했고, 후보는 시청의 소개 쪽이다
+
+- 보령머드(`mudfestival.or.kr`)와 함평나비(`hpftf.or.kr`)는 제목이 재단 이름이다 — 첫 `<h1>` 에 축제 이름이 있어도 `.or.kr` 이라 그 해 날짜가 글자로 있어야 받는다(S1D). 저장된 글로는 확인할 수 없다
+- 재현하려면 페이지의 URL · 제목 · h1 · 링크 호스트가 있어야 해서 `evidence/page_index.jsonl` 을 더했다(§8)
 
 ## 7. 보안
 
@@ -313,7 +382,8 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 |---|---|
 | `collect_order.json` | 입력 지시서 사본(검증 뒤 기본값이 채워진 형태) |
 | `accepted.csv` | `output.schema` 로 변환한 행. `steak-sources-v1` 은 §8.1 |
-| `accepted.jsonl` | 받아들인 주장 원형(`match_rule` · 규칙 B 의 창 원문 포함) |
+| `accepted.jsonl` | 받아들인 주장 원형(`match_rule` · 규칙 B 의 창 원문 포함). `official_url` 은 `quote` · `signals` · `link_source_url` 도(§6.4) |
+| `candidates.csv` | 자동으로 받지 못한 `official_url` 후보 — 사람이 본다(§6.4). 없으면 머리글만 |
 | `rejected.jsonl` | 주장 + `reason_code` + 짧은 설명 |
 | `unverifiable.jsonl` | 주장 + `reason_code` + HTTP 상태 · robots 판정 |
 | `claims_raw.json` | Collector 가 준 원문(호출별) |
@@ -322,6 +392,7 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 | `evidence/fetch_log.jsonl` | 요청마다 — URL · 최종 URL · 푼 IP · 상태 · 바이트 · `sha256` · robots 판정 · 간격 대기 초 · 시각(KST) |
 | `evidence/pages/<sha256>.txt` | 추출한 본문(정규화 **전**) — 대조 재현용 |
 | `evidence/robots/<host>.txt` | 받은 robots.txt |
+| `evidence/page_index.jsonl` | 받은 페이지마다 — 청한 URL · 최종 URL · `page_sha256` · 제목 · 첫 h1 · 링크가 가리키는 다른 호스트(200개까지). `pages/<sha256>.txt` 가 어느 URL 의 글인지와 §6.4 판정을 다시 돌리는 데 쓴다 |
 | `summary.json` | 대상 수 · 주장 수 · 버린 주장 수(`claims_dropped`) · accepted/rejected/unverifiable 수 · 사유 코드별 수 · 요청 수 · 호스트별 요청 수 · 공급자 · 실패(`status` = `OK` · `PARTIAL` · `PROVIDER_FAILURE`) · 소요 |
 
 - 시각은 전부 `datetime.now(ZoneInfo("Asia/Seoul")).isoformat()` — `+09:00` 이 붙는다
@@ -415,6 +486,19 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 - 뒤 단계의 ORDER 에 `collect` 가 없으면 Builder 는 앞 단계가 놓은 `data/…csv` 를 보지 못한다(ProposalBuilder 가 `data/` 를 건너뛴다). 그 단계가 자료를 읽어야 하면 HEAD 가 `data/` 밖 경로를 `output.path` 로 고르거나 코드가 파일을 읽게 지시해야 한다
 - Collector 호출은 `provenance.json` 에 넣지 않는다 — 호출 기록은 `runs/<run_id>/collect/llm_calls.jsonl` 에 있다
 
+### 10.2 공식 URL 후보 파일 (2026-11-25)
+
+§6.4 가 자동으로 받지 못한 후보는 `collect.output.path` 옆 **`<이름>_candidates.csv`** 에 따로 놓는다(`data/a.csv` → `data/a_candidates.csv`). 본 파일에는 섞지 않는다.
+
+| 무엇 | 정한 것 | 왜 |
+|---|---|---|
+| 받아들인 행 0 · 후보 있음 | 본 파일은 놓지 않고(§10.1) **후보 파일만** 놓는다 | 사람이 볼 것이 가장 필요한 때다. `required_outputs` 가 본 파일을 가리키면 전과 같이 「없음」이다 |
+| 후보 0 | 후보 파일을 놓지 않는다 | 머리글만 있는 파일을 만들지 않는다 |
+| 후보 파일의 자리 | 본 파일과 같은 관문 — 경로 검사(allowed · protected · 제어면 · 링크) · `O_EXCL` · `O_NOFOLLOW` · `collected_files.json` 기록(sha256) | 범위 셈 · 변조 검사(`COLLECTED_FILE_MODIFIED`)가 같이 돈다 |
+| 그 자리가 막혔다(allowed 밖 · 이미 남의 파일이 있다) | **멈추지 않는다.** 후보는 증거 `runs/<run_id>/collect/candidates.csv` 에만 남는다 | 후보 파일 때문에 검증을 지난 행을 잃지 않는다. `allowed_paths` 를 파일 하나로 좁힌 ORDER 가 그 경우다 |
+| HEAD · REVIEWER | 집계에 `candidates` 수. 리뷰어 줄은 후보 파일이 있을 때 「그 파일의 행은 검증을 지난 것이 아니다」를 덧붙인다 | 「Director 가 검증했다」는 말이 후보에 붙지 않게 |
+| Builder 프롬프트 | 후보 파일은 싣지 않는다(`builder_preview` 는 `output.path` 하나만 본다) | 검증하지 않은 값이 프롬프트로 가지 않는다 |
+
 ## 11. 시험 계획 — 실제 네트워크 없이
 
 **공통 장치**
@@ -435,6 +519,8 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 | `tests/test_collector_outputs.py`(구현에서는 `test_collector_cli.py` 에 합쳤다) | `steak-sources-v1` 머리글이 기존 파일과 **글자 단위로 같음**(`data/sources/siksin-magazine.csv` 머리글을 fixture 로 복사) · `lat/lng/coord_source` 빈칸 · 변환기에 좌표를 넣으면 예외 · `checked_at_kst` 날짜만 · `region` 약칭 · 증거 파일 다섯 종류 생성 · `summary.json` 수치가 jsonl 행 수와 일치 |
 | `tests/test_collector_cli.py` | 지시서 → 산출물까지 끝에서 끝(stub 공급자 + FakeTransport) · **지어낸 값이 거부됨** · 종료값 0/1/2 · accepted 0 건도 종료값 0 · `make_collect_order.py` 가 pending CSV 두 장에서 대상을 만든다(작은 사본) |
 | `tests/test_collector_director_stage.py`(2단계 · 구현 2026-11-25) | `ORDER_READY→COLLECTING→BUILDING` 전이 허용 · `COLLECTING→REVIEWING` 거부 · `output.path` 가 allowed 밖이면 ORDER 거부 · `collected_files.json` 의 파일이 `max_files_changed` 셈에서 빠짐 · REVIEWER 프롬프트에 CSV diff 와 `collection` 집계가 들어감 · accepted 0 건이 HUMAN_REQUIRED 가 아님 |
+
+| `tests/test_collector_official_url.py`(2026-11-25 · 115건 — 리뷰 수정 뒤) | §6.4 — **받으면 안 되는 것 먼저**: 포털 · 블로그 · 뉴스 호스트 10곳 · 실제 여행 안내 쪽 · 시청의 깊은 쪽(`suwon.go.kr`) · 뉴스 기사 · 대행사 첫 화면 · 지난해 날짜뿐인 페이지 · 게시판 글 날짜. 이어서 S1 · S2 · S3 · 첫 화면 판정 · LLM 을 부르지 않음 · 후보 CSV 에 페이지 글이 없음 · 2단계가 후보 파일을 따로 놓음. 고정 자료 `tests/fixtures/official_url/*.txt` 는 그날 실행의 증거 페이지 글 8장이다 |
 
 **통합 시험(opt-in · 기본 회귀 밖)** — `tests/test_collector_smoke.py`(`integration_cli`). 구스테이크528 · 식신 매거진 2770 · `address` → 「압구정로 108」이 accepted. 기본 `pytest -q` 는 돌리지 않는다
 

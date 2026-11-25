@@ -6,14 +6,19 @@ import os
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
+
+from core.collector.verify import csv_url
 
 KST = ZoneInfo("Asia/Seoul")
 STEAK_HEADER = ["name", "address", "region", "category", "source_name", "source_url", "checked_at_kst", "status",
                 "lat", "lng", "coord_source"]
 GENERIC_HEADER = ["target_id", "field", "value", "source_url", "match_rule", "checked_at_kst"]
+# 공식 URL 후보(사람이 볼 것) — 코드가 정한 낱말과 Director 가 접속한 URL 뿐이다. 페이지 글(제목 · 인용)은 싣지 않는다
+CANDIDATE_HEADER = ["target_id", "field", "value", "source_url", "reason_code", "detail", "signals", "checked_at_kst"]
+CANDIDATE_REASONS = ("NEEDS_HUMAN_REVIEW", "CONFLICT")
 COORD_COLUMNS = ("lat", "lng", "coord_source")
 _SIDO_SHORT = {"서울특별시": "서울", "부산광역시": "부산", "대구광역시": "대구", "인천광역시": "인천", "광주광역시": "광주",
                "대전광역시": "대전", "울산광역시": "울산", "세종특별자치시": "세종", "경기도": "경기", "강원특별자치도": "강원",
@@ -50,7 +55,8 @@ def steak_row(**values) -> Dict[str, str]:
 
 def build_rows(schema: str, targets, accepted: List[dict], titles: Dict[str, str], checked_date: str) -> tuple:
     if schema == "generic-claims-v1":
-        rows = [{"target_id": c["target_id"], "field": c["field"], "value": c["value"], "source_url": c["source_url"],
+        # source_url 은 넘어간 곳의 URL 일 수 있다(남이 고른 글) — URL 꼴이 아니면 origin 만 싣는다. 원문은 jsonl 에 남는다
+        rows = [{"target_id": c["target_id"], "field": c["field"], "value": c["value"], "source_url": csv_url(c["source_url"]),
                  "match_rule": c.get("match_rule", ""), "checked_at_kst": checked_date} for c in accepted]
         return GENERIC_HEADER, rows
     by = {}
@@ -70,9 +76,40 @@ def build_rows(schema: str, targets, accepted: List[dict], titles: Dict[str, str
             name=t.known.get("name", ""), address=addr["value"] if addr else "",
             region=region_of(addr["value"] if addr else "", t.known.get("sido", "")),
             category=t.known.get("category") or "steakhouse",
-            source_name=host, source_url=src, checked_at_kst=checked_date,
+            source_name=host, source_url=csv_url(src), checked_at_kst=checked_date,
             status="closed" if "status" in got else "unknown"))
     return STEAK_HEADER, rows
+
+
+def _site(url) -> str:
+    """「www.」 를 뗀 호스트 — 같은 사이트의 후보인지 견준다."""
+    try:
+        h = (urlsplit(str(url or "")).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+    return h[4:] if h.startswith("www.") else h
+
+
+def candidate_rows(accepted: List[dict], unverifiable: List[dict], checked_date: str) -> List[dict]:
+    """자동으로 받지 못한 official_url 후보. 이미 받은 대상은 **받은 값과 같은 호스트**의 후보만 뺀다(같은 사이트의 깊은 쪽).
+    다른 호스트의 후보는 남긴다 — 틀린 사이트를 받았을 때 진짜 사이트가 사람 눈에서 사라지지 않게(리뷰 fable 4).
+    증거 unverifiable.jsonl 에는 전부 남는다."""
+    done: Dict[str, set] = {}
+    for r in accepted:
+        if r.get("field") == "official_url":
+            done.setdefault(r["target_id"], set()).add(_site(r.get("value")))
+    out, seen = [], set()
+    for r in unverifiable:
+        key = (r.get("target_id"), r.get("value"))
+        if (r.get("field") != "official_url" or r.get("reason_code") not in CANDIDATE_REASONS or not r.get("value")
+                or _site(r.get("value")) in done.get(r.get("target_id"), ()) or key in seen):
+            continue
+        seen.add(key)
+        out.append({"target_id": r["target_id"], "field": "official_url", "value": r["value"],
+                    "source_url": csv_url(r.get("source_url") or ""), "reason_code": r["reason_code"],
+                    "detail": r.get("detail") or "", "signals": "|".join(r.get("signals") or []),
+                    "checked_at_kst": checked_date})
+    return out
 
 
 RAW_MAX_BYTES = 10 * 1024 * 1024
@@ -116,7 +153,7 @@ def raw_within_limit(raw: List[dict], limit: int = RAW_MAX_BYTES) -> List[dict]:
 def write_all(base: Path, *, order_json: dict, header: List[str], rows: List[dict], accepted: List[dict],
               rejected: List[dict], unverifiable: List[dict], claims: List[dict], raw: List[dict],
               llm_calls: List[dict], fetch_log: List[dict], pages: Dict[str, str], robots: Dict[str, str],
-              summary: dict) -> None:
+              summary: dict, candidates: Optional[List[dict]] = None, page_index: Optional[List[dict]] = None) -> None:
     if base.is_symlink():
         raise OSError(f"OUTPUT_SYMLINK: {base} 가 심볼릭 링크다")
     for d in (base / "evidence", base / "evidence" / "pages", base / "evidence" / "robots"):
@@ -126,6 +163,11 @@ def write_all(base: Path, *, order_json: dict, header: List[str], rows: List[dic
         w = csv.DictWriter(fh, fieldnames=header)
         w.writeheader()
         w.writerows(rows)
+    with _open_w(base / "candidates.csv", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=CANDIDATE_HEADER)
+        w.writeheader()
+        w.writerows(candidates or [])
+    _jsonl(base / "evidence" / "page_index.jsonl", page_index or [])
     _jsonl(base / "accepted.jsonl", accepted)
     _jsonl(base / "rejected.jsonl", rejected)
     _jsonl(base / "unverifiable.jsonl", unverifiable)

@@ -90,6 +90,7 @@ class ProposalBuilder(AntigravityBuilder):
         self.last_execution_info = {'exit_code': None, 'attempts': [], 'output': ''}
         root = Path(worktree_path).resolve()
         from core.builder_context import project_roots, referenced_documents, reference_roots
+        from core.collector import stage as collect_stage
         # 포크: 프로젝트 자신을 가리키는 폴더 표기는 참조 스냅샷으로 다시 넘기지 않는다(이미 소스로 간다)
         documents = referenced_documents(order, reference_roots(root), project_roots=project_roots(root))
         sources = {}
@@ -105,6 +106,10 @@ class ProposalBuilder(AntigravityBuilder):
                 continue
             rel = path.relative_to(root).as_posix()
             if any(p.startswith('.') or p in {'node_modules', '__pycache__', 'data'} for p in Path(rel).parts):
+                continue
+            # 포크(리뷰 fable 5): 공식 URL 후보 파일(<이름>_candidates.csv)은 이름 꼴로 뺀다 — 검증을 지나지 않은 값이고,
+            # 앞선 ORDER 가 놓은 것은 이번 ORDER 의 output.path 로는 알 수 없다(Builder 는 ORDER 와 worktree 만 받는다)
+            if collect_stage.is_candidates_file(rel):
                 continue
             allowed, _ = SafetyPolicy.check_pre_tool_file_write(rel, str(root), order.allowed_paths, order.protected_paths)
             # Write protection must not hide baseline source from a fork/upgrade.
@@ -142,9 +147,10 @@ class ProposalBuilder(AntigravityBuilder):
         # 포크(5차 리뷰 1): 수집 CSV(ORDER.collect.output.path)는 행을 통째로 싣지 않는다 — 열 이름 · 행 수 · 다시 본 예시
         # 몇 줄만 따로 알린다. output.path 가 `data/` 밖이면 위 걸음이 파일을 통째로 실었으므로 여기서 뺀다
         # 빼는 기준은 요약이 아니라 ORDER 의 output.path 다 — 요약을 못 만들어도(읽기 오류) 통째로 실은 사본이 남지 않는다
-        from core.collector import stage as collect_stage
         collected = collect_stage.builder_preview(order, root)
-        for rel in {collect_stage.output_rel(order), *collected} - {''}:
+        # 옆에 놓인 공식 URL 후보 파일(<이름>_candidates.csv)은 위 걸음에서 이름 꼴로 이미 뺐다
+        out_rel = collect_stage.output_rel(order)
+        for rel in {out_rel, *collected} - {''}:
             sources.pop(rel, None)
             if rel in omitted:
                 omitted.remove(rel)

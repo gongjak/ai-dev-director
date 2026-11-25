@@ -25,6 +25,7 @@ source: claude
 | 2026-11-09 | `5384978` | 빌더 교체 순서를 설정으로 고정 — agy 를 못 쓰면 claude → codex |
 | 2026-11-09 | `374104e` | 적용 관문 결함 — HEAD 프록시가 P2 만 남기고 PASS 한 결과도 적용할 수 있게 한다 |
 | 2026-11-25 | (미커밋) | Collector 2단계 — Director 가 Builder 앞에서 웹 자료를 모아 검증한 행만 worktree 에 놓는다 |
+| 2026-11-25 | (미커밋) | Collector 공식 URL 자동 판정 — LLM 없이 코드가 S1 · S1D · S2 · S3 규칙으로 받고(리뷰 뒤 조였다), 못 받은 후보는 `_candidates.csv` 로 따로 낸다 |
 
 ## 2026-11-09 — 빌더 교체 순서 (agy → claude → codex)
 
@@ -152,3 +153,64 @@ codex 가 HIGH 셋을 냈다. 지적마다 재현 명령을 먼저 돌리고, �
   - 1 의 재현율은 시험 고정값으로만 쟀다 — 디스크의 실제 수집 결과(`runs/*/collect/accepted.jsonl` 둘)는 주소 값이 0건이었다. 실제 수집에서 `ADDRESS_BAD_SHAPE` 가 얼마나 나오는지는 `summary.json` 의 `reason_codes` 로 본다
   - 3 의 내용 검사는 폴더 스냅샷에만 있다 — 낱개로 가리킨 문서(`reference_paths` 의 파일 하나)는 이름 · 경로만 보고 내용은 보지 않는다(원래 그랬고 이번 지적 밖이다)
   - `core/result_manager.py` `apply()` 의 `datetime.utcnow()`(원본 코드 · 요청 식별자용)는 이번 범위 밖이라 두었다
+
+## 2026-11-25 — Collector 공식 URL 자동 판정 (S1 · S2 · S3 · 후보 파일)
+
+> [!warning] 이 절의 규칙 · 받음 수 · 시험 수는 **리뷰 전**의 것이다. 리뷰 뒤 규칙이 조여졌다(S1 은 `.go.kr` 뿐 · `.or.kr` 은 날짜가 더 있어야 하는 S1D · S3 는 날짜 필수 · 저장된 20곳 받음 2 → 0) — 아래 「리뷰 결과 — 공식 URL 자동 판정」과 `docs/COLLECTOR_DESIGN.md` §6.4 가 지금 규칙이다
+
+- **무엇** — `official_url` 을 LLM 에 묻지 않고 코드가 정한다. 값은 Director 가 접속한 최종 URL 의 origin 이다. 기본 조건(이름이 페이지에 있다 · 거부 · 비공식 호스트 · 공용 접미사가 아니다 · 사이트의 첫 화면이다)을 지나고 강한 신호 하나가 있으면 받는다 — **S1** 제목 · 첫 h1 에 이름 + `.go.kr` · `.or.kr` · `.re.kr` / **S2** 같은 수집에서 받은 `.go.kr` 페이지가 이름 가까이에서 그 호스트로 링크 / **S3** 제목 · h1 에 이름 + (그 해 축제 날짜 · 주최 · 주관 기관 · 그 해 프로그램) 가운데 둘. 그 밖에는 `NEEDS_HUMAN_REVIEW` 로 본 파일이 아닌 `<output.path 이름>_candidates.csv` 에 놓는다. 규칙 전문은 `docs/COLLECTOR_DESIGN.md` §6.4 · §10.2
+- **왜** — 실제 미션 `runs/RUN-261125163703-…/collect`(축제 20곳)이 받은 행 0 이었다. ① 추출 프롬프트가 「URL 을 페이지 글에서 그대로 베껴라」였는데 첫 화면에는 제 URL 이 없다(16건 `{"claims":[]}`) ② 검증기가 `known.official_domain` 이 있어야만 받았다(찾으려는 것을 먼저 요구하는 순환). 공작 결정(2026-11-25) — 규칙을 두어 자동으로 받는다
+- **파일**
+  - `core/collector/verify.py` — `PageText.h1` · `PageText.links`(본문 `full()` 과 증거 sha 는 그대로) · `NON_OFFICIAL_HOSTS` 확장(여행 안내 · 뉴스 · 대기열 · `visitkorea.or.kr` · 「여기유」 punycode 등) · `is_home_page()` · `official_signals()` · `decide_official_url()` · `OfficialDecision`
+  - `core/collector/cli.py` — 추출 호출에서 `official_url` 을 뺀다(그 필드뿐인 대상은 LLM 0회 · LLM 한도와 무관) · 받은 페이지를 다 모은 뒤 판정하는 ⑧-2 · `target_year()` · `summary.candidates`
+  - `core/collector/providers.py` — 추출 프롬프트에서 `official_url` 설명을 뺐다
+  - `core/collector/outputs.py` — `candidates.csv`(`CANDIDATE_HEADER`) · `evidence/page_index.jsonl`
+  - `core/collector/stage.py` — 후보 파일을 본 파일 옆에 놓고 `collected_files.json` 에 적는다(`_place_candidates`) · 집계에 `candidates` · 리뷰어 줄에 「후보 파일의 행은 검증을 지난 것이 아니다」
+  - `agents/proposal_builder.py` — 소스 걸음에서 후보 파일을 뺀다(`output.path` 가 `data/` 밖이면 통째로 실렸다 — 시험으로 재현한 뒤 막았다)
+  - 새로 — `tests/test_collector_official_url.py` · `tests/fixtures/official_url/*.txt`(그날 실행의 증거 페이지 글 8장)
+- **정한 것**
+  - **첫 화면 조건은 공작이 정한 규칙에 더한 것이다** — 실제 수집의 `suwon.go.kr` 축제 소개 쪽이 제목에 이름이 있고 `.go.kr` 이라 S1 을 그대로 지나 **시청 origin 이 축제 공식 사이트로** 놓였을 것이다. 깊은 쪽은 `NOT_HOME_PAGE` 후보가 되고 후보 값은 그 쪽의 URL 이다
+  - 판정에 LLM 을 쓰지 않는다(지시의 「결정론 규칙이 정하면 LLM 을 건너뛴다」 쪽) — 저장된 증거로 판정을 그대로 다시 돌릴 수 있다
+  - S2 는 링크 앞뒤 300자(공백을 줄인 글) 안에 이름이 있어야 한다 — 축제 여럿을 한 쪽에 늘어놓은 시청 목록에서 옆 축제의 링크를 집지 않게
+  - S3 의 날짜는 범위이거나 「기간 · 일시 · 일정 · 개최」 표지 뒤여야 한다 — 게시판 글 날짜(「2026.04.13」)는 세지 않는다. 프로그램 신호는 낱말 앞뒤 40자 안의 연도, 또는 제목 · h1 의 연도 + 본문의 낱말이다(뒤쪽은 실제 `sabal21.com` 을 보고 정했다 — 제목이 「2026 문경찻사발축제」이고 차림에 「프로그램 안내」가 있다). 날짜 앞에 「모집 · 접수 · 신청 · 공모 …」가 있는 기간은 축제 날짜로 세지 않는다 — 제목에 연도만 있는 사이트가 모집 공고 하나로 받아지지 않게
+  - 대상 연도는 `known.year`(네 자리), 없으면 지시서를 낸 해다
+  - 페이지를 쓴 사람의 글(제목 · h1 인용)은 `accepted.jsonl` · `unverifiable.jsonl` 에만 남고 CSV 둘 어디에도 싣지 않는다. 받은 행의 `match_rule` 열이 S1 · S2 · S3 다
+  - 받아들인 행이 0 이어도 후보 파일은 놓는다. 후보 파일 자리가 막히면(allowed 밖 · 남의 파일) 멈추지 않고 증거 폴더에만 둔다
+  - 받기 규칙(robots · 속도 · `DEFAULT_DENY`)은 손대지 않았다 — TLS · robots 로 받지 못한 사이트는 전과 같이 `unverifiable` 이고 S2 로 살리지 않는다
+  - `verify_claim()` · `check_official_url()` 과 `known.official_domain` 경로는 그대로 두었다(옛 시험의 기대값을 바꾸지 않았다)
+- **그날 실행을 저장된 페이지로 다시 판정한 결과**(네트워크 없음) — 20곳 가운데 **받음 2**(무주반딧불축제 S1 · 문경찻사발축제 S3) · **후보 7** · 그 축제의 사이트를 받지 못함 6(robots 금지 2 · TLS 등 4) · 포털 · 뉴스 쪽만 찾음 5. **문경찻사발은 `PROGRAM` 의 「제목에 연도」 갈래가 있어야 받는다 — 앞뒤 40자 규칙만이면 받음은 1 이다**(이 갈래는 그 페이지를 본 뒤에 정했다). 저장된 글에는 h1 · 링크가 없어 제목만으로 본 **하한**이다 — 제목이 재단 이름인 보령머드 · 함평나비는 h1 에 축제 이름이 있으면 S1 이 되고, S2 는 재현할 수 없다. 받은 둘은 호스트를 손으로 확인했다
+- **시험** — `tests/test_collector_official_url.py` 68건. 받으면 안 되는 것(포털 · 블로그 · 뉴스 호스트 10곳 · 시청의 깊은 쪽 · 뉴스 기사 · 대행사 첫 화면 · 지난해 날짜뿐 · 게시판 글 날짜)을 먼저 본다. 규칙 다섯(첫 화면 · 비공식 호스트 목록 · S3 신호 · S2 의 `.go.kr` · S1 의 공공 도메인)을 하나씩 꺼 보면 시험이 각각 실패하는 것을 확인했다. 모집 기간 · 들여쓴 표 · Builder 프롬프트 누출 시험 셋은 고치기 전 실패를 먼저 확인했다. 전체 1077 통과 · 0 실패 · 3 제외(320초 · 마지막 코드 수정 뒤 실행 · 고치기 전 기준 1009 통과). 옛 시험의 기대값은 바꾸지 않았다. 저장소 `runs/` 폴더 수는 전체 시험 전후 4,693 그대로다
+- **리뷰** — agy Neon high + fable 서브에이전트(커밋 전 변경). 지적을 원본에 대어 가리고 고쳤다 — 아래 「리뷰 결과 — 공식 URL 자동 판정」. **이 절의 규칙 · 받음 수 · 시험 수는 리뷰 전의 것이다** — 지금 규칙은 `docs/COLLECTOR_DESIGN.md` §6.4 와 아래 리뷰 결과가 맞다
+- **고치지 않은 것** — URL 찾기 프롬프트(`providers.discover_urls`)는 그대로다. 지금도 「주소가 적힌 페이지 · 식당 안내 · 목록 쪽」을 찾으라고 해서, URL 을 주지 않은 대상 10곳이 여행 안내 · 뉴스 쪽을 받아 왔다(받지 못한 5곳이 이 때문이다). S2 의 재료인 `.go.kr` 페이지도 거기서 나온다 — 받는 수를 더 올릴 자리는 이 프롬프트다
+- **주의** — 실제 네트워크로는 돌리지 않았다. 자동으로 받는 수는 사이트의 제목 · h1 에 달렸다 — 영리 도메인(`.com` · `.co.kr`)의 공식 사이트는 S2 · S3 를 지나야 해서 후보로 남는 일이 많다(그날 실행에서 진주남강유등 · 대구치맥 · 춘천마임 · 자라섬재즈). `.or.kr` 은 비영리 등록 이름이지만 등록 심사가 엄격하지 않다 — S1 은 제목 · h1 의 이름과 첫 화면 조건에 기대고 있다
+
+### 리뷰 결과 — 공식 URL 자동 판정 (2026-11-25 · agy Neon high + fable 서브에이전트 · 커밋 전 변경)
+
+지적마다 고치기 전에 실패하는 시험을 먼저 썼다(`tests/test_collector_official_url.py` 의 `test_r…` — 39건이 고치기 전 실패). 두 리뷰어가 같은 것을 짚은 곳은 한 줄로 묶었다.
+
+| # | 지적 | 판정 | 고친 것 |
+|---|---|---|---|
+| fable 1 · agy 2 | S3 가 실제 신호 없이 선다 — 「주관적인 … 반드시」 「안내도」 「변동시」 가 주최 기관으로, 제목의 연도 + 차림 낱말 하나가 프로그램으로 잡혀 블로그 후기가 받아졌다. 날짜 범위가 「2026.04.13 - 1차 안내」 에도 맞았다 | CONFIRMED | `ORGANIZER` 는 줄 머리(구분 기호 뒤)의 「주최 :」 · 「주관 :」 + 낱말째로 선 기관 이름 · `PROGRAM` 의 「제목에 연도」 갈래를 뺐고 연도는 수로(앞뒤 숫자 없이) · 「보안 · 제휴 · 설치 프로그램」 과 `programming` 은 세지 않는다 · `DATES` 범위는 뒤쪽에도 월 · 일 · 모집 낱말은 날짜 뒤 14자도 본다 · **S3 는 `DATES` 가 반드시 있어야 한다** |
+| fable 1 | 무료 호스팅(`*.imweb.me` · `*.github.io` · `*.cafe24.com` · `*.notion.site` …)을 받는다 | CONFIRMED | `FREE_HOSTING_SUFFIXES` — 이름 자체는 공용 접미사로, 그 아래 호스트는 `NEEDS_HUMAN_REVIEW · FREE_HOSTING` 후보로. 지시서가 `official_domain` 으로 적은 호스트는 그대로 받는다 |
+| fable 1 | 닫지 않은 `<h1>` 이 본문 300자를 h1 로 만든다 · `<svg><title>` 이 제목에 붙는다 | CONFIRMED | 닫지 않았거나 120자를 넘는 h1 은 버린다 · 첫 `<title>`(svg 밖)만 제목이다 |
+| agy 3 | `noscript` · `template` 안의 h1 · `img alt` · 링크를 모은다(숨긴 h1 이 S1 재료가 된다) | CONFIRMED | 숨긴 구역에서는 h1 · alt · 링크를 모으지 않는다 |
+| fable 2 · agy 1 | S2 가 이름에서 300자 안의 아무 링크나 받는다 — 표의 옆 행 · 대행사 · 다른 시청 · 포트를 보지 않음 · 받는 쪽 제목을 보지 않음 | CONFIRMED | 받는 쪽 제목 · h1 에 이름이 있어야 한다(모든 신호의 앞 조건으로 올렸다) · 이름은 **링크의 글이나 같은 `tr` · `li` 안**에 있어야 한다 · 포트까지 견준다 · 받는 쪽이 `.go.kr` 이면 S2 가 아니다 |
+| fable 3 | 이름 일부 일치(「장미축제」 ↔ 「서울장미축제」) · 루트에서 깊은 쪽으로 넘어간 곳이 첫 화면으로 통한다 | CONFIRMED | 제목 · h1 · S2 의 이름은 낱말째(앞뒤에 한글이 맞닿지 않게) · 넘어간 곳은 두 단계 · 질의 없음까지만 첫 화면 |
+| fable 4 | 틀린 사이트를 받으면 진짜 사이트가 후보 파일에서 사라진다(`outputs.candidate_rows`) | CONFIRMED | 받은 값과 **같은 호스트**의 후보만 뺀다 |
+| fable 5 | 앞선 ORDER 의 후보 파일이 뒤 ORDER 의 Builder 프롬프트에 통째로 실린다 · 넘어간 곳의 URL 이 `source_url` 로 그대로 간다 | CONFIRMED | Builder 소스 걸음이 `*_candidates.csv` 를 **이름 꼴로**(대소문자 무시) 뺀다 · CSV 의 `source_url` 은 `csv_url()` 을 지난다(URL 글자 · 200자, 아니면 origin) — `accepted.csv` 두 틀과 후보 파일 모두 |
+| fable 6 | 받은 값에 한글 호스트 · 끝 점이 남는다 | CONFIRMED | 값은 `check_url_format` 이 다듬은 호스트(punycode · 끝 점 없음)로 만든다 |
+| agy 4 [추정] | `candidates_rel` 이 `.csv` 를 보지 않아 `web.CSV` · `data/sub/ab` 에서 어긋난다 | 해당 없음 | 지시서 검증(`order.py` `Output._path`)이 소문자 `.csv` 가 아닌 경로를 수집 전에 거부한다(시험으로 확인). 그래도 `candidates_rel` 이 이름을 자르지 않게 하고 Builder 는 이름 꼴로 빼게 바꿨다 |
+| agy 5 [추정] | 후보 파일이 검증 파일과 같은 `files` 목록에 표지 없이 들어간다 | 해당 없음 | 호출자를 읽었다 — `collected_files.json` 은 「놓은 그대로인가」 검사에만 쓰이고(`orchestrator._collected_modified` · `result_manager`), 리뷰어 줄은 후보 파일을 따로 알리며, 집계의 `accepted` · `rows` 는 0 으로 따로 간다 |
+| agy 6 [추정] | `requested_at_kst` 가 비면 S3 의 연도 조건이 풀린다 | 해당 없음 | 지시서 검증이 `YYYY-MM-DDT…+09:00` 꼴만 받는다(시험으로 확인). 그래도 `official_signals()` 는 네 자리 연도가 아니면 신호를 내지 않게 했다 |
+
+- **정한 것 — `.or.kr` · `.re.kr`** : S1 은 `.go.kr` 뿐이다. `.or.kr` · `.re.kr` 은 등록 심사가 느슨해서 제목의 이름에 **그 해의 축제 날짜(`DATES`)** 가 더 있어야 받고, 그 행의 `match_rule` 은 **`S1D`** 다
+- **파일** — `core/collector/verify.py`(추출기 · 규칙 · `csv_url` · `FREE_HOSTING_SUFFIXES`) · `core/collector/outputs.py`(후보 고르기 · `source_url`) · `core/collector/stage.py`(`candidates_rel` · `is_candidates_file`) · `agents/proposal_builder.py`. `cli.py` · `providers.py` 는 이번에 손대지 않았다. `PageText.links` 는 두 칸 그대로이고 둘째 칸의 뜻만 바뀌었다(앞뒤 300자 → 링크의 글 + 같은 행 · 항목). 본문 `full()` 은 제목이 둘인 페이지 말고는 그대로다
+- **바꾼 옛 시험(이 작업의 시험이고 커밋 전이다)** — `.or.kr` 로 S1 을 보던 것들(무주반딧불 직접 · CLI · 충돌 · 단계 — 자료에 날짜를 넣고 기대값을 `S1D` 로, 날짜가 없는 실제 저장 글은 후보로) · `test_s1_public_domains_only`(`.or.kr` · `.re.kr` → 받지 않음) · 시청 자료 둘(`gov_page` · `JINJU` — 이름과 링크를 같은 행 · 항목에) · `test_cli_s2…`(시청의 깊은 쪽이 후보 파일에 남는다) · `test_s3_real_sabal21`(받음 → 후보) · 주최를 쌍점 없이 쓴 자료 둘 · 링크 글 기대값 하나
+- **저장된 20곳 다시 판정(네트워크 없음)** — **받음 0 · 후보 9 · 못 받음 11**(리뷰 전 받음 2 · 후보 7). 무주반딧불은 `.or.kr` 인데 올해 날짜가 게시판 글 날짜뿐이고, 문경찻사발은 뺀 `PROGRAM` 갈래로만 서 있었다. 둘 다 진짜 공식 사이트다 — 수를 맞추려고 규칙을 다시 풀지 않았다. 저장된 글에는 h1 · 링크가 없어 S2 는 재현하지 못한다(하한이다)
+- **남긴 것**
+  - `ORGANIZER` — 쌍점 뒤에 홀로 선 「반드시 · 안내도 · 변동시 · 다시」 는 여전히 기관 이름으로 센다(「주최 : 반드시 확인」 → `ORGANIZER` · 고친 뒤 실측). 「…시 · …도」 지명과 꼴이 같고 지명 사전이 없다. 쌍점 없는 문장(리뷰가 든 재현)은 막혔고, S3 는 제목의 이름과 그 해 날짜를 더 요구한다
+  - 띄어 쓴 「서울 장미축제」 는 「장미축제」 로 읽힌다 — 이름 대조가 공백을 무시해서 낱말 경계로는 막지 못한다. 흔한 낱말뿐인 이름은 지시서에 지역을 붙여 적어야 한다
+  - 조사가 붙은 제목(「보령머드축제에 오신 것을…」)과 쌍점 없이 쓴 「주최 보령시」 는 놓친다(후보로 간다) — 닫힌 쪽으로 틀리게 두었다
+  - 앞선 ORDER 가 `data/` 밖에 놓은 **본 수집 파일**은 뒤 ORDER 의 Builder 프롬프트에 통째로 실릴 수 있다 — Builder 는 ORDER 와 worktree 만 받아 앞선 실행의 `collected_files.json` 을 볼 수 없다. 검증을 지난 행이고 이번 변경 전부터 그랬다. 후보 파일만 이름 꼴로 막았다
+  - 이름이 `_candidates.csv` 로 끝나는 프로젝트 자신의 파일도 Builder 프롬프트에서 빠진다
+- **시험** — `tests/test_collector_official_url.py` 115건(리뷰 전 69건 — 위 절의 「68건」은 한 건 적게 센 것이다 · 새 시험 46건). 전체 **1124 통과 · 0 실패 · 3 제외**(325초 · 마지막 코드 동작 수정 뒤 실행 · 고치기 전 같은 날 기준 1078 통과 → +46). 그 뒤에는 주석 한 줄과 문서만 고쳤고 이 파일 115건을 다시 돌려 통과를 확인했다. 저장소 `runs/` 폴더 수는 전체 시험 전후 4,693 그대로다
