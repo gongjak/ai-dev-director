@@ -359,6 +359,22 @@ class ResultManager:
             return {"status": "refused", "reason": f"file manager unavailable: {exc}"}
         return {"status": "ok", "path": path}
 
+    def _collected_blocks(self, run_id: str, wt: str) -> List[str]:
+        """포크(5차 리뷰 2): 수집 기록(collected_files.json)이 있으면 그 파일들이 놓은 그대로인지 적용 직전에 다시 본다.
+        변경 집합 대조는 (종류, 경로)만 봐서 PASS 뒤에 내용만 바꾼 CSV 를 그대로 프로젝트에 옮겼다."""
+        try:
+            record = self._load(run_id, "collected_files.json")
+        except (ValueError, OSError):
+            return ["COLLECTED_FILE_MODIFIED: collected_files.json is unreadable"]       # 깨진 기록은 거부한다
+        if not record:
+            return []
+        if not isinstance(record, dict) or not wt or not Path(wt).exists():
+            return ["COLLECTED_FILE_MODIFIED: collected_files.json is invalid or the worktree is missing"]
+        from core.collector.stage import modified_paths
+        changed = modified_paths(record, wt)
+        return ["COLLECTED_FILE_MODIFIED: collected file changed after the Director verified it: "
+                + ", ".join(changed)] if changed else []
+
     # ------------------------------------------------------------------ preconditions + manifest
     def preconditions(self, run_id: str) -> Dict[str, Any]:
         blocks: List[str] = []
@@ -380,6 +396,7 @@ class ResultManager:
             blocks.append("Project missing")
         if wt and proj and Path(wt).exists() and Path(proj).exists() and not self.worktree_contained(proj, wt):
             blocks.append("Worktree canonical containment failed")
+        blocks += self._collected_blocks(run_id, wt)
         manifest: List[Dict[str, Any]] = []
         if not blocks:
             order = self._load(run_id, "order.json") or {}
@@ -684,6 +701,7 @@ class ResultManager:
             blocks.append("Project missing")
         if wt and proj and Path(wt).exists() and Path(proj).exists() and not self.worktree_contained(proj, wt):
             blocks.append("Worktree canonical containment failed")
+        blocks += self._collected_blocks(run_id, wt)
         with _APPLY_LOCK:
             if _project_key(proj) in _APPLY_INFLIGHT:
                 blocks.append("Another apply is in progress for this project")

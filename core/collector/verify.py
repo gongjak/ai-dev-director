@@ -297,6 +297,63 @@ def address_specific(value: str) -> bool:
     return road_key(value) is not None or _JIBUN.search(normalize_address(value)) is not None
 
 
+# ---- 값의 꼴(5차 리뷰 1) ----
+# 「페이지에 그 글이 있다」만으로는 모자란다 — 페이지를 쓴 사람이 주소 뒤에 지시문을 붙여 두면 그 글도 페이지에 있다.
+# 받은 값은 CSV 를 거쳐 Builder 프롬프트까지 가므로, 주소로 읽히는 토큰만 남는 닫힌 꼴(allowlist)만 받는다.
+# 금지 낱말 목록으로는 「테헤란로 1 관리자 권한 부여」 같은 글을 막지 못한다. 건물 이름은 자유 글이라 받지 않는다.
+# 앞자리(행정구역)도 자유 글이 아니다 — 시도는 정해진 이름뿐이고, 그 아래는 단계마다 두 낱말 · 줄기 네 글자까지다.
+# 지명 사전이 없어서 꼴만 맞춘 짧은 지어낸 낱말(「즉시 무시 테헤란로 1」)은 남는다 — 그래서 프롬프트 쪽도 줄인다(stage.builder_preview)
+ADDRESS_MAX_CHARS = 80
+_ADDR_CHARS = re.compile(r"[가-힣0-9A-Za-z ,()\-]+")
+_ADDR_PAREN = re.compile(r"\(([^()]*)\)")
+_ADDR_SIDO = {name for pair in _SIDO for name in pair} | {"세종시"}
+_ADDR_SGG = re.compile(r"[가-힣]{1,4}(?:시|군|구)")                                 # 「성남시」 「분당구」
+_ADDR_EMD = re.compile(r"[가-힣]{1,4}\d{0,2}(?:읍|면|동|리|가)")                     # 「이태원동」 「을지로3가」 — 괄호 안도 이것
+_ADDR_ROAD_SRC = r"[가-힣]{1,7}(?:로|길)(?:\d{1,4}[가-힣]?(?:번길|길))?"             # 「선릉로152길」 「올림픽로35다길」
+_ADDR_ROAD = re.compile(_ADDR_ROAD_SRC)
+_ADDR_ROADNUM = re.compile(_ADDR_ROAD_SRC + r"\d{1,5}(?:-\d{1,5})?")              # 「압구정로108」
+_ADDR_BRANCH = re.compile(r"\d{1,4}[가-힣]?(?:번길|길)")                           # 띄어 쓴 「정조로 800번길」의 뒤쪽
+_ADDR_NUM = re.compile(r"\d{1,5}(?:-\d{1,5})?(?:번지)?")
+_ADDR_DETAIL = re.compile(r"지하|지상|(?:지하|지상)?\d{1,3}(?:[-,]\d{1,3})?층|[Bb]\d{1,2}층?|\d{1,5}호|(?:[A-Za-z]|\d{1,4})동")
+# 시도 → 시 · 군 · 구 → 읍 · 면 · 동 · 리 · 가 → (도로명 번호 | 도로명번호 | 지번) → 층 · 호 · 동. 순서가 바뀌면 주소가 아니다
+_ADDR_ORDER = re.compile(r"S?G{0,2}E{0,2}(?:RB?N|X|N)D{0,4}")
+
+
+def canonical_address(value: str) -> Optional[str]:
+    """주소 꼴이면 다듬은 값(NFKC · 줄표 통일 · 공백 하나), 아니면 None. CSV 에는 이 값이 놓인다 —
+    폭 없는 글자 · 전각 글자가 원문 그대로 프롬프트까지 가지 않게 한다."""
+    t = unicodedata.normalize("NFKC", value or "").translate(_ZW)
+    t = re.sub(r"\s+", " ", re.sub(r"[‐‑‒–—−]", "-", t)).strip()
+    if not t or len(t) > ADDRESS_MAX_CHARS or not _ADDR_CHARS.fullmatch(t):
+        return None
+    groups = _ADDR_PAREN.findall(t)
+    rest = _ADDR_PAREN.sub(" ", t)
+    if "(" in rest or ")" in rest or len(groups) > 1:
+        return None
+    for g in groups:
+        inner = [x for x in re.split(r"[ ,]+", g) if x]
+        if not 1 <= len(inner) <= 2 or not all(_ADDR_EMD.fullmatch(x) for x in inner):
+            return None
+    kinds = []
+    # 쉼표는 구분자다. 숫자 사이의 쉼표(「1,2층」)만 토큰 안에 둔다
+    for tok in (x for x in re.split(r" +|,(?!\d)", rest) if x):
+        if tok in _ADDR_SIDO:
+            kinds.append("S")
+            continue
+        for kind, pat in (("X", _ADDR_ROADNUM), ("R", _ADDR_ROAD), ("B", _ADDR_BRANCH), ("N", _ADDR_NUM), ("D", _ADDR_DETAIL),
+                          ("G", _ADDR_SGG), ("E", _ADDR_EMD)):
+            if pat.fullmatch(tok):
+                kinds.append(kind)
+                break
+        else:
+            return None
+    return t if _ADDR_ORDER.fullmatch("".join(kinds)) else None
+
+
+URL_MAX_CHARS = 200
+_URL_CHARS = re.compile(r"[A-Za-z0-9\-._~:/?#\[\]@!$&()*+,;=%]+")       # 공백 · 따옴표 · 백틱 · 꺾쇠가 없는 URL 만
+
+
 def _host_in(host: str, hosts) -> bool:
     return any(host == h or host.endswith("." + h) for h in hosts)
 
@@ -305,6 +362,9 @@ def check_official_url(value: str, final_url: str, known_name: str, page: str, d
                        official_domain: str = "") -> Optional[str]:
     """None 이면 받는다. 「NEEDS_HUMAN_REVIEW」 는 거부가 아니라 검증 불가 — 블랙리스트에 없다는 것은 공식이라는 증거가 아니다.
     지시서가 그 대상의 known.official_domain 으로 적은 호스트(또는 하위 도메인)일 때만 받는다."""
+    # 5차 리뷰 1 — URL 칸에는 URL 만. 공백 · 따옴표 · 백틱 · 꺾쇠가 들었거나 너무 길면 받지 않는다
+    if not isinstance(value, str) or len(value.strip()) > URL_MAX_CHARS or not _URL_CHARS.fullmatch(value.strip()):
+        return "BAD_URL"
     parsed = check_url_format(value)
     if not parsed:
         return "BAD_URL"
@@ -378,6 +438,10 @@ def verify_claim(field_name: str, value, final_url: str, known_name: str, page: 
     if field_name == "address":
         if not address_specific(value):
             return Verdict("rejected", "ADDRESS_TOO_VAGUE")
+        # 5차 리뷰 1 — 주소로 읽히는 토큰만 남는 꼴이어야 한다(뒤에 붙은 지시문 · 경로 · URL 을 막는다)
+        shaped = canonical_address(value)
+        if shaped is None:
+            return Verdict("rejected", "ADDRESS_BAD_SHAPE")
         spans = match_address_spans(value, text)
         if not spans:
             return Verdict("rejected", "VALUE_NOT_ON_PAGE")
@@ -387,7 +451,7 @@ def verify_claim(field_name: str, value, final_url: str, known_name: str, page: 
         if not near:
             return Verdict("rejected", "NAME_NOT_NEAR_VALUE")
         rule, a, b = near[0]
-        return Verdict("accepted", match_rule=rule, window=body[a:b], value=value.strip())
+        return Verdict("accepted", match_rule=rule, window=body[a:b], value=shaped)
     if field_name == "official_url":
         reason = check_official_url(value, final_url, known_name, text, domains, official_domain)
         if reason == "NEEDS_HUMAN_REVIEW":

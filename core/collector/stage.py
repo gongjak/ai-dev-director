@@ -9,7 +9,9 @@ ORDER 의 `collect` 를 수집 지시서로 바꿔 `run_collect` 를 돌리고, 
 - HEAD 가 domains 를 적어도 기본 거부 목록은 늘 합친다
 - HEAD · REVIEWER 에게는 숫자와 사유 코드만 간다 — 페이지 원문 · 거부된 주장 본문은 싣지 않는다(§7)
 """
+import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -26,7 +28,6 @@ from core.safety import SafetyPolicy
 
 ORDER_ID = "collect"                      # 증거 폴더 이름 — runs/<run_id>/collect/
 _CTRL = re.compile(r"[\x00-\x1f\x7f]+")
-BUILDER_CSV_CHARS = 60_000                # Builder 프롬프트에 싣는 수집 CSV 글자 상한
 # summary.json 에서 HEAD · REVIEWER 로 넘겨도 되는 칸 — 전부 숫자이거나 코드가 정한 낱말이다
 _COUNT_KEYS = ("targets", "claims", "accepted", "rows", "rejected", "unverifiable", "fetch_requests", "llm_calls")
 
@@ -159,9 +160,44 @@ def reviewer_line(verification: Optional[dict]) -> str:
             + json.dumps(col, ensure_ascii=False) + "\n")
 
 
-def builder_sources(order, root) -> Dict[str, str]:
-    """Builder 프롬프트에 싣는 수집 CSV. ProposalBuilder 는 `data/` 를 통째로 건너뛰므로 직접 넣는다 —
-    ORDER 가 가리킨 그 파일 하나뿐이다."""
+BUILDER_SAMPLE_ROWS = 3                   # Builder 프롬프트에 예시로 싣는 행 수
+_PLAIN_CELL = re.compile(r"[\w가-힣.:+\- ]{0,40}")
+_URL_COLUMNS = ("source_url", "official_url")
+
+
+def _safe_cell(column: str, cell: str, row: Dict[str, str]) -> str:
+    """예시 행의 칸 하나를 다시 본다 — 꼴이 맞지 않으면 비운다. 검증기를 지난 값이어도 파일은 그 뒤에 바뀔 수 있고,
+    source_url 의 경로처럼 값 검사를 거치지 않는 칸도 남이 고른 글이다."""
+    from urllib.parse import urlsplit
+    from .verify import canonical_address
+    cell = cell if isinstance(cell, str) else ""
+    kind = row.get("field", "") if column == "value" else column      # generic-claims-v1 의 value 는 field 가 종류다
+    if kind == "address":
+        return canonical_address(cell) or ""
+    if kind in _URL_COLUMNS:
+        try:
+            parts = urlsplit(cell.strip())
+            host = (parts.hostname or "").encode("idna").decode("ascii")
+        except (ValueError, UnicodeError):
+            return ""
+        # 호스트까지만 — 경로 · 질의는 페이지를 올린 쪽이 마음대로 적는 글이다
+        ok = parts.scheme in ("http", "https") and re.fullmatch(r"[a-z0-9.-]{1,100}", host)
+        return f"{parts.scheme}://{host}/" if ok else ""
+    if kind == "status":
+        return cell if cell in ("closed", "unknown") else ""
+    return cell if _PLAIN_CELL.fullmatch(cell) else ""
+
+
+def output_rel(order) -> str:
+    """ORDER 의 collect.output.path(슬래시 통일). 수집이 없으면 빈 문자열."""
+    spec = getattr(order, "collect", None)
+    return str(((spec.output if spec is not None else None) or {}).get("path") or "").replace("\\", "/")
+
+
+def builder_preview(order, root) -> Dict[str, dict]:
+    """Builder 프롬프트에 싣는 수집 CSV 의 요약 — {경로: {header, total_rows, sample_rows}} (5차 리뷰 1).
+    행을 통째로 싣지 않는다. Builder 가 할 일은 그 파일을 읽는 코드를 쓰는 것이라 열 이름 · 행 수 · 예시 몇 줄이면 되고,
+    웹에서 온 글이 프롬프트에 닿는 넓이가 수백 행에서 「다시 본 칸 몇 개」로 준다. ORDER 가 가리킨 그 파일 하나뿐이다."""
     spec = getattr(order, "collect", None)
     if spec is None:
         return {}
@@ -172,12 +208,30 @@ def builder_sources(order, root) -> Dict[str, str]:
     try:
         if not p.is_file() or p.is_symlink():
             return {}
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        with p.open(encoding="utf-8", errors="replace", newline="") as fh:
+            reader = csv.reader(fh)
+            header = [h if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,39}", h) else "" for h in next(reader, [])][:40]
+            total, samples = 0, []
+            for cells in reader:              # 행 수는 줄 수가 아니다 — 따옴표 안의 줄바꿈이 있다
+                total += 1
+                if len(samples) < BUILDER_SAMPLE_ROWS:
+                    row = dict(zip(header, cells))
+                    samples.append([_safe_cell(col, row.get(col, ""), row) for col in header])
+    except (OSError, csv.Error):
         return {}
-    if len(text) > BUILDER_CSV_CHARS:
-        text = text[:BUILDER_CSV_CHARS].rsplit("\n", 1)[0] + "\n"      # 행 중간에서 자르지 않는다
-    return {rel: text}
+    return {rel: {"header": header, "total_rows": total, "sample_rows": samples}}
+
+
+def builder_sources(order, root) -> Dict[str, str]:
+    """builder_preview 를 CSV 글로 — 머리글과 다시 본 예시 행뿐이다(행 전체가 아니다)."""
+    out = {}
+    for rel, pv in builder_preview(order, root).items():
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(pv["header"])
+        w.writerows(pv["sample_rows"])
+        out[rel] = buf.getvalue()
+    return out
 
 
 def _default_factory(corder: CollectOrder):

@@ -397,6 +397,32 @@ class Orchestrator:
         except Exception:
             return set()
 
+    def _collected_modified(self, run_id: str, worktree_path: Optional[str]) -> list:
+        """포크: collected_files.json 에 적힌 파일 가운데 놓은 그대로가 아닌 것(고쳤다 · 지웠다 · 링크로 바꿨다).
+        수집이 없던 실행(기록 없음)은 빈 목록이다. 기록이 깨져 읽지 못하면 닫힌 쪽 — 그 사실을 한 항목으로 돌려준다."""
+        try:
+            record = self._load_json(run_id, "collected_files.json")
+        except Exception as exc:
+            return [f"collected_files.json unreadable ({type(exc).__name__})"]
+        if not record:
+            return []
+        if not isinstance(record, dict) or not worktree_path:
+            return ["collected_files.json invalid or worktree unknown"]
+        from core.collector import stage as collect_stage
+        return collect_stage.modified_paths(record, worktree_path)
+
+    def collected_tamper_stop(self, run_id: str, worktree_path: Optional[str], when: str, logger: logging.Logger,
+                              provenance_records: list) -> Optional[Dict[str, Any]]:
+        """포크(4차 리뷰 D · 5차 리뷰 2): Director 가 모아 검증한 파일이 바뀌었으면 FAIL 로 멈춘다. 그대로면 None.
+        Builder 뒤 · 검증 명령 뒤뿐 아니라 리뷰어 호출 앞 · HEAD 결정 앞 · PASS 직전에도 부른다 — 재개(resume)는
+        앞의 두 자리를 지나지 않고, 리뷰어 · HEAD CLI 가 도는 동안에도 worktree 는 바뀔 수 있다."""
+        tampered = self._collected_modified(run_id, worktree_path)
+        if not tampered:
+            return None
+        msg = (f"COLLECTED_FILE_MODIFIED: a file the Director collected and verified was modified or removed {when} ("
+               + ", ".join(tampered) + "); collected rows must stay byte-identical - derive a new file instead")
+        return self._stop(run_id, State.FAIL, msg, logger, provenance_records, "COLLECTED_FILE_MODIFIED", [msg])
+
     def run_collect_stage(self, run_id: str, order: OrderSchema, worktree_path: str, logger: logging.Logger,
                           provenance_records: list) -> Optional[Dict[str, Any]]:
         """포크: 웹 자료 수집(Collector) — 기준선 뒤 · Builder 앞. ORDER 에 collect 가 없으면 아무것도 하지 않는다.
@@ -782,15 +808,8 @@ class Orchestrator:
         Returns (verification, stop)."""
         # 포크(4차 리뷰 D): Builder 가 수집 파일을 고치거나 지웠으면 여기서 멈춘다 — 범위 판정 · 시험 · 리뷰보다 먼저.
         # 그대로 두면 REVIEWER 가 「Director 가 모든 행을 검증했다」는 줄과 함께 Builder 가 지어낸 행을 받는다.
-        from core.collector import stage as collect_stage
-
         def collected_tamper_stop(when):
-            tampered = collect_stage.modified_paths(self._load_json(run_id, "collected_files.json"), worktree_path)
-            if not tampered:
-                return None
-            msg = (f"COLLECTED_FILE_MODIFIED: a file the Director collected and verified was modified or removed {when} ("
-                   + ", ".join(tampered) + "); collected rows must stay byte-identical - derive a new file instead")
-            return self._stop(run_id, State.FAIL, msg, logger, provenance_records, "COLLECTED_FILE_MODIFIED", [msg])
+            return self.collected_tamper_stop(run_id, worktree_path, when, logger, provenance_records)
         stop = collected_tamper_stop("by the Builder")
         if stop:
             return None, stop
@@ -926,6 +945,10 @@ class Orchestrator:
                                    provenance_records: list):
         """Trial claim -> review (exceptions recorded, never left uncaught) -> unparseable/CLI-failure handling ->
         provider failover -> provenance. Returns (review_result, stop)."""
+        # 포크(5차 리뷰 2): 리뷰어를 부르기 전에 수집 파일을 다시 본다 — run · 수리 라운드 · resume 이 모두 여기를 지난다
+        stop = self.collected_tamper_stop(run_id, worktree_path, "before the review", logger, provenance_records)
+        if stop:
+            return None, stop
         if self._proxy():
             return self._run_reviewer_autonomous(run_id, order, verification, project_context, worktree_path, logger, provenance_records)
         git_diff = verification.get("git_diff", "") if verification else ""
@@ -1013,6 +1036,10 @@ class Orchestrator:
                                    verification: Dict[str, Any], review_result: ReviewResultSchema, worktree_path: str,
                                    logger: logging.Logger, provenance_records: list):
         """HEAD decision with provider failure handling / Claude failover. Returns (decision, stop)."""
+        # 포크(5차 리뷰 2): HEAD 가 판정하기 전에 다시 본다 — 리뷰어 CLI 가 도는 동안 바뀐 것 · DECIDING 에서 재개한 것
+        stop = self.collected_tamper_stop(run_id, worktree_path, "before the HEAD decision", logger, provenance_records)
+        if stop:
+            return None, stop
         if self._proxy():
             return self._run_decision_autonomous(run_id, order, builder_result, verification, review_result,
                                                  worktree_path, logger, provenance_records)
@@ -1273,7 +1300,19 @@ class Orchestrator:
                 ev["reasons"].append(f"REGRESSION: baseline {base_count} -> post {post_count}")
             else:
                 ev["regression"] = "PASS"
+        # 포크(5차 리뷰 2): 수집 파일이 놓은 그대로인가 — 없던 실행은 NONE. 최종 관문과 적용 관문이 이 칸을 본다
+        tampered = self._collected_modified(run_id, wt["path"] if wt["status"] == "PRESENT" else worktree_path)
+        has_record = bool(self._safe_collected_record(run_id))
+        ev["collected_files"] = "FAIL" if tampered else ("PASS" if has_record else "NONE")
+        if tampered:
+            ev["reasons"].append("COLLECTED_FILE_MODIFIED: " + ", ".join(tampered))
         return ev
+
+    def _safe_collected_record(self, run_id: str):
+        try:
+            return self._load_json(run_id, "collected_files.json")
+        except Exception:
+            return True               # 읽지 못하는 기록도 「있다」 — _collected_modified 가 닫힌 쪽으로 알린다
 
     def final_evidence_reasons(self, run_id: str, order: Optional[OrderSchema], worktree_path: Optional[str]) -> list:
         """Reasons that refuse PASS (see final_evidence). Kept for callers that only need the list."""
@@ -1359,6 +1398,11 @@ class Orchestrator:
         evidence["head_decision"] = decision.decision
         evidence["reviewer_verdict"] = getattr(review_result, "verdict", None)
         self._save_json(run_id, "final_evidence.json", evidence)
+        if evidence.get("collected_files") == "FAIL":
+            # 포크(5차 리뷰 2): HEAD 가 도는 동안 바뀐 수집 파일 — 사람에게 넘기지 않고 FAIL 이다(4차 리뷰 D 와 같은 판정).
+            # HEAD 판정이 무엇이든 멈춘다. 「Director 가 검증했다」는 전제가 깨진 결과다
+            return self.collected_tamper_stop(run_id, worktree_path, "before the final decision was recorded",
+                                              logger, provenance_records)
         if final_state == State.PASS:
             reasons = list(evidence["reasons"])
             if evidence.get("canonical_containment") != "PASS":
@@ -1931,6 +1975,12 @@ class Orchestrator:
             curr_state = State.REVIEWING
 
         if curr_state in (State.REVIEWING, State.DECIDING):
+            # 포크(5차 리뷰 2): 재개는 validate_post_build 를 지나지 않는다 — 멈춘 사이 바뀐 수집 파일을 여기서 본다.
+            # 아래 증거 검사가 이 사유를 EVIDENCE_MISSING(HUMAN_REQUIRED)으로 바꾸기 전에 FAIL 로 닫는다
+            stop = self.collected_tamper_stop(run_id, worktree_path, "while the run was interrupted", logger,
+                                              provenance_records)
+            if stop:
+                return stop
             # Late-state evidence check BEFORE any further AI call: baseline + verification must exist and be sound
             missing = [r for r in self.final_evidence_reasons(run_id, order, worktree_path)
                        if not r.startswith("ORDER_PATH_VIOLATION") and not r.startswith("CANONICAL_CONTAINMENT=FAIL")]

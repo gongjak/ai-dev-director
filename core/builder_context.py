@@ -22,12 +22,14 @@ DIRECTOR_ROOT = Path(__file__).resolve().parent.parent      # Director 자신 �
 _SECRET_KEYS = r'(?:secret|passw|token|credential|api[_-]?key|access[_-]?key|private[_-]?key)'
 _SECRET_ALWAYS = re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY|\bsk-[A-Za-z0-9_-]{1,}|\bAKIA[0-9A-Z]{12,}|\bgh[pousr]_[A-Za-z0-9]{20,}'
                             r'|\bxox[abprs]-[A-Za-z0-9-]{8,}|\b1//0[A-Za-z0-9_-]')
-# 설정 파일(.json · .yaml · .toml · .txt)은 `키: 값` 만 있어도 비밀로 본다
+# 코드가 아닌 글 파일(.json · .yaml · .toml · .txt · .md …)은 `키: 값` 만 있어도 비밀로 본다
 _SECRET_IN_CONFIG = re.compile(_SECRET_KEYS + r'[\w-]*["\x27]?\s*[:=]\s*\S'
                                r'|\brefresh(?:[_-]?token)?["\x27]?\s*[:=]\s*\S', re.I)
-# 코드 · 문서는 따옴표 안의 값이 붙어 있을 때만 — `def login(password: str)` · `token = next()` 는 비밀이 아니다
+# 코드는 따옴표 안의 값이 붙어 있을 때만 — `def login(password: str)` · `token = next()` 는 비밀이 아니다
 _SECRET_IN_CODE = re.compile(_SECRET_KEYS + r'[\w-]*["\x27]?\s*[:=]\s*["\x27][^"\x27\s]{3,}["\x27]', re.I)
-_CONFIG_SUFFIXES = {'.json', '.yaml', '.yml', '.toml', '.txt'}
+# 5차 리뷰 3 — 전에는 설정 확장자만 `키: 값` 을 봐서 문서(.md)의 따옴표 없는 `production_password: 값` 이 나갔다.
+# 거꾸로 센다: 코드 확장자만 따옴표 규칙이고, 그 밖의 글 파일은 전부 `키: 값` 규칙이다(새 확장자가 생겨도 닫힌 쪽)
+_CODE_SUFFIXES = {'.py', '.ts', '.tsx', '.js', '.jsx', '.cjs', '.mjs'}
 
 
 def project_roots(worktree_path):
@@ -140,7 +142,7 @@ def _secret_content(suffix, content):
     """내용이 비밀로 보이는가 — 개인키 머리글 · 알려진 토큰 꼴 · `password: 값` 같은 대입."""
     if _SECRET_ALWAYS.search(content):
         return True
-    return bool((_SECRET_IN_CONFIG if suffix in _CONFIG_SUFFIXES else _SECRET_IN_CODE).search(content))
+    return bool((_SECRET_IN_CODE if suffix in _CODE_SUFFIXES else _SECRET_IN_CONFIG).search(content))
 
 
 def _relation(folder, others):
