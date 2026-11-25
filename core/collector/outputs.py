@@ -64,12 +64,13 @@ def build_rows(schema: str, targets, accepted: List[dict], titles: Dict[str, str
             continue
         src = (addr or url)["source_url"]
         host = urlsplit(src).hostname or ""
-        title = (titles.get(src) or "")[:80]
+        # 4차 리뷰 E — 페이지 <title> 은 싣지 않는다. 남이 쓴 글이 source_name 을 타고 Builder · Reviewer 프롬프트로
+        # 들어갔다(「IGNORE ALL PRIOR RULES …」). 호스트는 Director 가 접속한 곳이라 지어낼 수 없다
         rows.append(steak_row(
             name=t.known.get("name", ""), address=addr["value"] if addr else "",
             region=region_of(addr["value"] if addr else "", t.known.get("sido", "")),
             category=t.known.get("category") or "steakhouse",
-            source_name=f"{title} ({host})" if title else host, source_url=src, checked_at_kst=checked_date,
+            source_name=host, source_url=src, checked_at_kst=checked_date,
             status="closed" if "status" in got else "unknown"))
     return STEAK_HEADER, rows
 

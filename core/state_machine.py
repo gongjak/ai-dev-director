@@ -7,6 +7,7 @@ class State:
     IDLE = "IDLE"
     PLANNING = "PLANNING"
     ORDER_READY = "ORDER_READY"
+    COLLECTING = "COLLECTING"      # 웹 자료 수집(선택) — ORDER 에 collect 가 있을 때만 지난다
     BUILDING = "BUILDING"
     VERIFYING = "VERIFYING"
     REVIEWING = "REVIEWING"
@@ -20,7 +21,8 @@ class State:
 VALID_NORMAL_TRANSITIONS = {
     State.IDLE: [State.PLANNING],
     State.PLANNING: [State.ORDER_READY],
-    State.ORDER_READY: [State.BUILDING],
+    State.ORDER_READY: [State.COLLECTING, State.BUILDING],
+    State.COLLECTING: [State.BUILDING],
     State.BUILDING: [State.VERIFYING],
     State.VERIFYING: [State.REVIEWING],
     State.REVIEWING: [State.DECIDING],

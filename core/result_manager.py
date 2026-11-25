@@ -59,7 +59,8 @@ class ResultManager:
     # ------------------------------------------------------------------ artifacts
     @staticmethod
     def run_dir(run_id: str) -> Path:
-        return Path(__file__).resolve().parent.parent / "runs" / run_id
+        from core.runs_dir import runs_root   # 포크: DIRECTOR_RUNS_DIR 로 옮길 수 있다(기본은 저장소 runs/)
+        return runs_root() / run_id
 
     def _load(self, run_id: str, name: str):
         p = self.run_dir(run_id) / name

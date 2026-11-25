@@ -93,6 +93,31 @@ class GitManager:
         return cls._run_git(["status", "--porcelain"], wt)
 
     @classmethod
+    def status_paths(cls, worktree_path: str) -> list:
+        """포크(4차 리뷰 J): HEAD 와 다른 모든 경로 — `git status --porcelain -z` 로 읽는다.
+        줄 단위 출력을 `[3:].strip()` · `' -> '` 로 풀면 이름 바꾸기의 원래 자리가 빠지고 끝 공백이 잘린다.
+        -z 는 경로를 따옴표 · 이스케이프 없이 NUL 로 끊어 준다. 이름 바꾸기 · 복사는 양쪽(새 자리 · 원래 자리)을 다 낸다.
+        _run_git 은 출력 앞뒤 공백을 잘라 첫 항목의 상태 칸(' M')을 망가뜨리므로 쓰지 않는다."""
+        res = subprocess.run(["git", "-c", "core.quotepath=false", "status", "--porcelain", "-z", "-uall"],
+                             cwd=str(Path(worktree_path).resolve()), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode != 0:
+            raise GitManagerError("Git command failed: status --porcelain -z\nError: "
+                                  + res.stderr.decode("utf-8", "replace").strip())
+        entries = res.stdout.decode("utf-8", "surrogateescape").split("\0")
+        paths, i = [], 0
+        while i < len(entries):
+            entry = entries[i]
+            i += 1
+            if len(entry) < 4:
+                continue
+            paths.append(entry[3:])              # -z 출력은 이미 '/' 로 온다 — 역슬래시는 파일 이름의 글자다
+            if entry[0] in "RC" or entry[1] in "RC":           # 다음 항목이 원래 자리다(상태 칸이 없다)
+                if i < len(entries) and entries[i]:
+                    paths.append(entries[i])
+                i += 1
+        return paths
+
+    @classmethod
     def inspect_changes(cls, worktree_path: str):
         """Dashboard-only observation. Never stage intent-to-add during a live build.
 

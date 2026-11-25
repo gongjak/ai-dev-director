@@ -112,6 +112,15 @@ def _pid_alive(pid) -> bool:
         return False
 
 
+def _collection_counts(orch, run_id: str):
+    """포크: 웹 자료 수집 숫자(받아들임 · 거부 · 검증 불가) — 다음 계획에 쓰게 HEAD history 에 넣는다."""
+    try:
+        from core.collector.stage import history_counts
+        return history_counts(orch._load_json(run_id, "collection.json"))
+    except Exception:
+        return None
+
+
 class MissionRunner:
     def __init__(self, orchestrator_factory: Callable[[], Any], store: Optional[MissionStore] = None,
                  notify: Optional[Callable[..., None]] = None):
@@ -378,6 +387,7 @@ class MissionRunner:
             "head_rationale": (dec.get("rationale") or "")[:1200],
             "files_changed": bld.get("files_modified"),
             "repair_rounds": len(orch._load_json(run_id, "repair_history.json") or []),
+            "collection": _collection_counts(orch, run_id),
         }
 
     @staticmethod

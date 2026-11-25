@@ -16,6 +16,12 @@ from schemas.order import OrderSchema
 from schemas.review_result import ReviewResultSchema
 from schemas.provenance import AgentProvenanceRecord
 
+def _collection_line(verification) -> str:
+    """포크: 웹 자료 수집 집계 한 줄(설계 COLLECTOR_DESIGN §10). 수집이 없으면 빈 문자열."""
+    from core.collector.stage import reviewer_line
+    return reviewer_line(verification)
+
+
 class ClaudeReviewer:
     """
     Read-only code reviewer agent executing the official Claude Code CLI (`claude`) as a subprocess.
@@ -141,7 +147,8 @@ class ClaudeReviewer:
             f"VERIFICATION PASSED: {verification.get('passed')}\n"
             f"VERIFICATION SUMMARY: {verification.get('summary')}\n"
             f"TEST COUNTS (Director's own run): {json.dumps(verification.get('test_counts'))}\n"
-            f"TEST OUTPUT TAIL: {((verification.get('test') or {}).get('output') or '')[-1500:]}\n\n"
+            f"TEST OUTPUT TAIL: {((verification.get('test') or {}).get('output') or '')[-1500:]}\n"
+            + _collection_line(verification) + "\n"
             f"GIT DIFF:\n```diff\n{git_diff}\n```\n\n"
             "FORMATTING MANDATE:\n"
             "Your output MUST contain ONLY a JSON code block formatted as:\n"

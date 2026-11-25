@@ -1,6 +1,6 @@
 'use strict';
 const frame=document.getElementById('workspace');
-const labels={NONE:'작업 대기',IDLE:'작업 대기',PLANNING:'계획 수립',ORDER_READY:'구현 준비',BUILDING:'코드 작성 중',VERIFYING:'테스트 실행 중',REVIEWING:'독립 검토 중',DECIDING:'결과 판단 중',PASS:'검증 통과',RECOVERED:'복구 완료 · 검증 통과',FAIL:'검증 실패',HUMAN_REQUIRED:'확인 · 수정 필요',TIMEOUT:'실행 시간 초과'};
+const labels={NONE:'작업 대기',IDLE:'작업 대기',PLANNING:'계획 수립',ORDER_READY:'구현 준비',COLLECTING:'웹 자료 수집 중',BUILDING:'코드 작성 중',VERIFYING:'테스트 실행 중',REVIEWING:'독립 검토 중',DECIDING:'결과 판단 중',PASS:'검증 통과',RECOVERED:'복구 완료 · 검증 통과',FAIL:'검증 실패',HUMAN_REQUIRED:'확인 · 수정 필요',TIMEOUT:'실행 시간 초과'};
 let busy=false,doc;
 function el(tag,text,cls){const n=doc.createElement(tag);n.textContent=text;if(cls)n.className=cls;return n;}
 function setup(){
@@ -42,9 +42,9 @@ async function refresh(){if(busy||!doc||!doc.getElementById('mission-control'))r
  doc.getElementById('mission-updated').textContent=elapsed===null?'아직 실행 기록이 없습니다.':'최근 단계 기록 · '+(elapsed<60?elapsed+'초 전':Math.floor(elapsed/60)+'분 전');
  doc.getElementById('mission-tests').textContent='적용 대기 '+(s.pending_result_count||0)+'건 · 승인 대기 '+(s.human_required_count||0)+'건';
  doc.getElementById('mission-details').textContent=research?((r.session_id||'연구 세션 없음')+'\n사이클 '+(r.cycle_number||0)+' / '+(r.cycle_budget||0)+'\n'+(r.moonshot||'')):((run.run_id||'작업 없음')+'\n'+(run.details||s.stage_sentence||'')+'\n최근 실행 기록: '+(run.updated_at||'없음'));
- const order=['PLANNING','ORDER_READY','BUILDING','VERIFYING','REVIEWING','DECIDING','PASS'],at=order.indexOf(state);
+ const order=['PLANNING','ORDER_READY','COLLECTING','BUILDING','VERIFYING','REVIEWING','DECIDING','PASS'],at=order.indexOf(state);
  const researchStage=(r.current_stage||'');const mapped=researchStage.includes('BUILD')?'BUILDING':researchStage.includes('VERIFY')?'VERIFYING':researchStage.includes('REVIEW')||researchStage.includes('CRITIQUE')?'REVIEWING':researchStage.includes('INTERPRET')||researchStage.includes('COMPLETE')?'DECIDING':'PLANNING';
- for(const n of doc.querySelectorAll('.mission-stages span')){const i=order.indexOf(n.dataset.stage);n.classList.toggle('current',research?mapped===n.dataset.stage:(state===n.dataset.stage||(state==='ORDER_READY'&&n.dataset.stage==='PLANNING')));n.classList.toggle('paused',!research&&state==='HUMAN_REQUIRED'&&run.last_stage===n.dataset.stage);n.classList.toggle('done',!research&&at>i);}
+ for(const n of doc.querySelectorAll('.mission-stages span')){const i=order.indexOf(n.dataset.stage);n.classList.toggle('current',research?mapped===n.dataset.stage:(state===n.dataset.stage||((state==='ORDER_READY'||state==='COLLECTING')&&n.dataset.stage==='PLANNING')));n.classList.toggle('paused',!research&&state==='HUMAN_REQUIRED'&&run.last_stage===n.dataset.stage);n.classList.toggle('done',!research&&at>i);}
  document.getElementById('shell-error').hidden=true;offlineVeil(0);
  }catch(e){const error=document.getElementById('shell-error');error.hidden=false;error.textContent='상태 연결을 확인하고 있습니다 · '+e.message;offlineVeil((window.__pollMisses||0)+1);}finally{busy=false;}}
 frame.addEventListener('load',setup);if(frame.contentDocument?.readyState==='complete')setup();setInterval(refresh,5000);

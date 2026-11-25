@@ -108,4 +108,11 @@ def configure_runtime(config, project):
             if exe.is_file():
                 updated['verification']['test_command'] = [str(exe.resolve()), '-m', 'pytest', 'tests/']
                 break
+        else:
+            # 포크: macOS 기본 PATH 에는 `python` 이 없다(python3 만 있다). 프로젝트 .venv 가 없으면
+            # Director 를 돌리는 인터프리터(pytest 가 깔려 있다)로 검증한다.
+            import shutil
+            import sys
+            if not shutil.which('python'):
+                updated['verification']['test_command'] = [sys.executable, '-m', 'pytest', 'tests/']
     return updated

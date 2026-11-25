@@ -8,7 +8,7 @@ source: claude
 # 웹 검색 · 수집 CLI(Collector) 설계
 
 > 설계 문서다. 코드에 관한 모든 진술은 `파일:줄` 로 원본을 가리킨다(2026-11-09 실측).
-> 1단계(독립 CLI)는 `core/collector/` 에 구현했다(2026-11-09). 2단계(Director 연결)는 어디에 꽂히는지만 적는다.
+> 1단계(독립 CLI)는 `core/collector/` 에 구현했다(2026-11-09). 2단계(Director 연결)는 2026-11-25 에 구현했다 — §10 표대로이고, 문서가 열어 둔 것과 달라진 것은 §10.1 에 적었다.
 > **2026-11-09 개정** — agy 를 공급자에서 뺐고(§4 실측), Claude haiku 가 「URL 찾기」와 「받은 본문에서 값 뽑기」만 한다. 웹에서 받는 것은 Director 코드다.
 
 ## 1. 문제와 제약
@@ -285,7 +285,7 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 **프롬프트 주입**
 - 웹 본문(코드가 받음) → haiku(도구 없음) → 주장 → 같은 본문과 대조. LLM 이 무엇을 말하든 **문자열이 그 페이지에 없으면 들어오지 않는다**. 도구가 없으니 주입이 성공해도 할 수 있는 것이 없다
 - Collector 출력의 `notes` · `reason` 은 판정에 쓰지 않는다. HEAD 에는 2단계에서 **집계 숫자와 accepted 행**만 간다 — 페이지 원문 · 거부된 주장 본문은 HEAD · BUILDER · REVIEWER 프롬프트에 싣지 않는다
-- 지시서 `purpose` · `query_hint` 는 `owner_policy.hard_stop_reasons()`(`core/owner_policy.py:76-79`)로 검사한다 — 결제 · 자격증명 · 실계좌 문구가 있으면 수집 자체를 거부
+- 지시서 `purpose` · `query_hint` · `known.*` · `urls`(4차 리뷰 G — `known` 은 검색어가 되고 `urls` 는 그대로 받는다)는 `owner_policy.hard_stop_reasons()`(`core/owner_policy.py:76-79`)로 검사한다 — 결제 · 자격증명 · 실계좌 문구가 있으면 수집 자체를 거부
 
 **SSRF**
 - 허용 스킴 `http` · `https` 뿐. `file:` · `ftp:` · `data:` · `gopher:` 거부
@@ -335,7 +335,7 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 | `address` | accepted 인 `address` 값. 없으면 빈칸이고 그 행은 `official_url` 이 accepted 일 때만 나간다 |
 | `region` | 주소 첫 토큰이 시도면 그 약칭(「서울특별시」→「서울」). 주소가 없거나 첫 토큰이 시도가 아니면(「강남구 …」) `known.sido` |
 | `category` | `known.category`. 없으면 `steakhouse` |
-| `source_name` | 받은 페이지의 `<title>`(≤ 80자) + 호스트 — 「울프강 스테이크하우스 서울 (wolfgangssteakhouse.co.kr)」 |
+| `source_name` | 받은 페이지의 호스트만 — 「wolfgangssteakhouse.co.kr」. `<title>` 은 싣지 않는다(4차 리뷰 E · 2026-11-25 — 남이 쓴 제목이 Builder · Reviewer 프롬프트로 들어갔다) |
 | `source_url` | accepted 주장의 최종 URL(리다이렉트 뒤) |
 | `checked_at_kst` | 받은 날짜 `YYYY-MM-DD`(KST) — 기존 파일이 날짜만 쓴다 |
 | `status` | `status` 필드가 `closed` 로 accepted 면 `closed`, 그 밖에는 **`unknown`** — §13 |
@@ -370,7 +370,7 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 | 결과를 worktree 에 쓰기 | `run_collect_stage` 안 | `SafetyPolicy.is_path_allowed()`(`core/safety.py:278`) · `is_path_protected()`(`:292`) 통과한 `output.path` 에 `accepted.csv` 를 쓴다. 증거 전부는 `runs/<run_id>/collect/` 에. `collected_files.json` 에 경로를 적는다 |
 | 범위 계산에서 구분 | `core/orchestrator.py:709-724` `validate_post_build` | 이미 `verification_artifacts.json` 으로 numstat · untracked 를 거르는 자리(`:717-724`)에 `collected_files.json` 도 넣어 **파일 수 · diff 줄 수 한도에서 뺀다**. diff 자체는 `:713` 에서 먼저 뽑히므로 REVIEWER 는 그대로 본다. 단 기존 필터는 `:717` 에서 `if self._proxy()` 에 묶여 있다 — Collector 필터는 **proxy 여부와 무관하게 늘** 적용한다. 그렇지 않으면 proxy 가 꺼진 실행에서 수집 행이 Builder 변경으로 세어진다 |
 | REVIEWER 가 보는 것 | `agents/codex_reviewer.py:83-98` `review(order, git_diff, verification, …)` · `:145` `GIT DIFF` | 새 CSV 는 `GitManager.get_diff()`(`core/git_manager.py:82-87`)가 `sync_intent_to_add`(`:71-79`)로 untracked 를 diff 에 넣으므로 행 단위로 보인다. 덧붙여 `verification["collection"] = summary.json 요약` 을 넣어 「받아들임 N · 거부 N · 검증 불가 N(사유별)」을 증거로 준다. Collector 는 `sync_intent_to_add` 를 직접 부르지 않는다(`:96-100` 「verification methods 만 staging 한다」) |
-| BUILDER 가 보는 것 | `agents/proposal_builder.py` 소스 수집 | CSV 가 worktree 의 allowed path 에 있으므로 기존 규칙으로 프롬프트에 실린다. 별도 변경 없음 |
+| BUILDER 가 보는 것 | `agents/proposal_builder.py` 소스 수집 | ~~기존 규칙으로 프롬프트에 실린다. 별도 변경 없음~~ — **틀렸다**(2026-11-25 실측): ProposalBuilder 는 `data/` 폴더를 통째로 건너뛴다(`agents/proposal_builder.py` 소스 걸음). 그래서 `collect.output.path` 그 파일 하나를 `core/collector/stage.builder_sources()` 로 직접 싣는다(§10.1) |
 | HEAD 가 아는 것 | `agents/head.py:79-112` `plan_next` 프롬프트 · `core/mission.py:323-326` history | 프롬프트에 한 단락 — 「Builder 는 웹을 읽지 못한다. 웹 자료가 필요하면 ORDER 의 `collect` 에 대상과 필드를 적어라. Director 가 모아 검증한 행만 `collect.output.path` 에 놓인다」. history 의 각 step 에 `collection: {accepted, rejected, unverifiable}` 숫자를 넣어 다음 계획에 쓰게 한다 |
 | 공급자 상태 | `core/orchestrator.py:159` `_handle_provider_failure` · `:147` `_record_provider_success` | Collector 의 `QUOTA` · `AUTH` 는 같은 함수로 넘긴다(도메인 `ANTHROPIC`). `report_health_db=true` |
 | 수집 0건 | — | **HUMAN_REQUIRED 가 아니다.** BUILDING 으로 그냥 가고 집계를 HEAD 에 돌려준다 — 자료 없이 할 수 있는 일인지 HEAD 가 정한다. 공급자 실패(`PROVIDER_FAILURE`)만 기존 정지 표식(`core/autopilot.py:86-90` `USER_STOP_MARKERS` 의 `"PROVIDER_FAILURE"`)을 탄다 |
@@ -379,6 +379,41 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 - 세 역할의 프롬프트 · 책임은 바뀌지 않는다. HEAD 는 ORDER 에 칸 하나가 늘고, BUILDER 는 파일이 하나 더 보이고, REVIEWER 는 diff 에 CSV 행이 더 있다
 - 대시보드 · 재개(`resume`) 는 `COLLECTING` 상태를 모르면 깨진다 — `core/orchestrator.py:1672` `resume()` 의 상태 분기에 `COLLECTING` 은 「처음부터 다시 수집」으로 넣는다(멱등 — 증거 폴더를 비우고 다시)
 - `_worktree_is_pristine()`(`core/orchestrator.py:424-432`)은 `git status` 가 비어야 참이다. CSV 가 놓인 뒤에는 영영 거짓이므로, 이 검사를 쓰는 기준선 게이트(`:444` `run_baseline_if_required`)와 `core/research_experiment.py:73` 은 **`collected_files.json` 의 경로를 빼고** 판정하게 고친다. 첫 실행은 수집이 기준선 뒤라 영향이 없고, BUILDING 도중 끊긴 실행의 재개가 영향을 받는다
+
+### 10.1 구현 기록 (2026-11-25)
+
+상태 — **구현 · 시험 통과. 실제 미션 · 실제 네트워크로는 아직 돌리지 않았다**(시험은 가짜 전송 + stub haiku).
+코드는 `core/collector/stage.py` 한 곳에 모으고, 오케스트레이터에는 부르는 줄만 넣었다(`run_collect_stage` · `_collected_unchanged`).
+
+| 무엇 | 구현 |
+|---|---|
+| ORDER `collect` | `schemas/order.py` `CollectSpec`(`targets` · `output` · `limits` · `domains`). 속 내용 검증은 `core.collector.order.parse_order` 그대로 — `stage.collect_order_data()` 가 지시서로 바꾼다(`order_id` 는 늘 `collect` · `purpose` 는 ORDER `goal` 을 한 줄 500자로 · `report_health_db=true`) |
+| ORDER 검사 | `autopilot.order_conflicts()` 가 `stage.spec_problems()` 를 부른다 — 지시서가 깨졌거나 `output.path` 가 allowed 밖 · protected · 제어면이면 HEAD 에게 돌려준다. `autopilot.order_text()` 에 `query_hint` · `known.*` · `urls` 를 넣어 ORDER 문구 검사(owner_policy)가 같은 함수로 본다. `domains.allow` · `deny` 는 글자 목록이어야 한다 — 아니면 지시서 거부 |
+| 상태 | `COLLECTING` — `ORDER_READY → [COLLECTING, BUILDING]` · `COLLECTING → [BUILDING]`. **`collect` 가 없는 ORDER 는 이 상태를 지나지 않는다** |
+| 꽂은 자리 | `run()` 은 기준선 뒤 · BUILDING 앞. `resume()` 은 ORDER_READY · COLLECTING 가지에서 같은 함수 — COLLECTING 에서 끊긴 실행은 처음부터 다시 수집한다(증거 폴더를 비우고, 이번 실행이 놓았고 그대로인 CSV 만 지운다 · 기준선은 다시 재지 않는다) |
+| 산출물 | `runs/<run_id>/collect/`(증거 전부) · `collect_order.json` · `collected_files.json`(`path` · `sha256` · `rows`) · `collection.json`(집계) |
+| 범위 셈 | `validate_post_build` 가 `collected_files.json` 의 파일을 proxy 여부와 무관하게 뺀다. **놓은 그대로(sha256 일치)인 파일만** 뺀다. Builder 가 수집 파일을 고치거나 지우면 범위 판정보다 먼저 `COLLECTED_FILE_MODIFIED`(FAIL)로 멈춘다(4차 리뷰 D) — 「Director 가 검증했다」는 리뷰어 줄이 Builder 가 손댄 행에 붙지 않는다. 그대로인 수집 파일의 행은 코드 검사(`money_code_findings` · `owner_policy.code_findings`)에서도 뺀다(4차 리뷰 F) |
+| REVIEWER | diff 에 CSV 행이 그대로 보인다. `verification["collection"]` 은 codex · claude 리뷰어 프롬프트에 `WEB COLLECTION` 한 줄로, google 리뷰어는 verification 을 통째로 싣는다 |
+| HEAD | `plan_next` 프롬프트에 한 단락 · `ORDER_SCHEMA_TEXT` 에 `collect` 칸 · 미션 history 의 step 결과에 `collection: {accepted, rejected, unverifiable, rows, status}` |
+| pristine | `_worktree_is_pristine(worktree_path, ignore=…)` — 기준선 게이트와 `core/research_experiment.py` 가 수집 파일을 빼고 본다 |
+| 대시보드 | `dashboard_server.py` · `dashboard_i18n.py` · `console/*.js` 의 상태 목록에 `COLLECTING` |
+
+**문서가 열어 둔 것 — 닫힌 쪽으로 정했다**
+
+| 무엇 | 정한 것 | 왜 |
+|---|---|---|
+| 받아들인 행 0 | **파일을 놓지 않는다.** BUILDING 으로 그대로 간다 | 머리글만 있는 CSV 는 `required_outputs` 의 「비어 있지 않은 파일」 검사를 지나 산출물 흉내가 된다 |
+| `output.path` 에 이미 파일이 있다 | 덮지 않고 `COLLECT_OUTPUT_EXISTS`(FAIL) | 결정 #5 「새 파일」. 앞 단계가 모은 자료 · 사람이 쓴 파일을 지우지 않는다. 예외 하나 — 그 파일이 이 실행의 증거 `collect/accepted.csv` 와 바이트가 같으면 놓고 나서 기록 전에 끊긴 것이다. 지우고 다시 모은다(4차 리뷰 I) |
+| `PARTIAL`(중간에 한도 등) · `INTERNAL_FAILURE` | 검증을 지난 행은 놓고 진행한다. 집계의 `status` 로 HEAD · REVIEWER 가 안다 | 행마다 받은 본문과 대조한 근거가 있다. `PROVIDER_FAILURE`(한 번도 성공 못 함)만 `HUMAN_REQUIRED` 로 멈춘다(`PROVIDER_FAILURE:` 접두 — `USER_STOP_MARKERS`) |
+| 지시서 거부 | 스키마 오류 `COLLECT_ORDER_REJECTED`(FAIL — 미션이 다시 계획한다) · 정책 문구 `COLLECT_ORDER_POLICY`(HUMAN_REQUIRED) · 자리 `COLLECT_PATH_DENIED`(FAIL). **모두 웹 · LLM 에 닿기 전** | 독립 실행의 종료값 1 과 같은 뜻 |
+| HEAD 가 적은 `domains.deny` | 기본 거부 목록을 늘 합친다 | HEAD 가 `deny: []` 로 지도 · 미쉐린 거부를 풀지 못하게 |
+| HEAD · REVIEWER 로 가는 집계 | 숫자와 사유 코드만(`stage.counts()` 가 허용한 칸만 옮긴다) | §7 — 페이지 원문 · 거부된 주장 본문을 프롬프트에 싣지 않는다 |
+| Builder 프롬프트의 CSV | 6만 자까지(행 끝에서 자른다) | 프롬프트 크기 |
+| 수집을 시작하는 조건 | **ORDER 의 `collect` 하나뿐이다.** `ENV_NO_WEB` 이나 `required_outputs` 의 경로 모양만으로는 Director 가 수집을 시작하지 않는다 | 무엇을 모을지(대상 · 필드)가 없으면 수집할 수 없다. 대신 HEAD 프롬프트가 「ENV_NO_WEB 으로 멈춘 일은 `collect` 로 다시 지시하라」고 알린다 |
+
+**알려진 한계**
+- 뒤 단계의 ORDER 에 `collect` 가 없으면 Builder 는 앞 단계가 놓은 `data/…csv` 를 보지 못한다(ProposalBuilder 가 `data/` 를 건너뛴다). 그 단계가 자료를 읽어야 하면 HEAD 가 `data/` 밖 경로를 `output.path` 로 고르거나 코드가 파일을 읽게 지시해야 한다
+- Collector 호출은 `provenance.json` 에 넣지 않는다 — 호출 기록은 `runs/<run_id>/collect/llm_calls.jsonl` 에 있다
 
 ## 11. 시험 계획 — 실제 네트워크 없이
 
@@ -399,7 +434,7 @@ Collector 출력 `claims_raw.json` 은 그대로 보존하고, 아래 형식으�
 | `tests/test_collector_providers.py` | stub 이 펜스 JSON 을 주면 파싱 · 빈 응답 → 1회 재시도 뒤 실패 · 「usage limit reached」→ `QUOTA` 로 분류되고 재시도 없이 멈춤 · 임시 폴더에 파일을 만드는 stub → `COLLECTOR_WROTE_FILES` 로 폐기 · `collector_model_args` 기본 haiku · sonnet 이면 예외 · 명령 줄 인자(추출은 `--tools \"\"` · URL 찾기는 `WebSearch` 만 · `WebFetch` 없음) · 본문이 `<page>` 안에 들어감 |
 | `tests/test_collector_outputs.py`(구현에서는 `test_collector_cli.py` 에 합쳤다) | `steak-sources-v1` 머리글이 기존 파일과 **글자 단위로 같음**(`data/sources/siksin-magazine.csv` 머리글을 fixture 로 복사) · `lat/lng/coord_source` 빈칸 · 변환기에 좌표를 넣으면 예외 · `checked_at_kst` 날짜만 · `region` 약칭 · 증거 파일 다섯 종류 생성 · `summary.json` 수치가 jsonl 행 수와 일치 |
 | `tests/test_collector_cli.py` | 지시서 → 산출물까지 끝에서 끝(stub 공급자 + FakeTransport) · **지어낸 값이 거부됨** · 종료값 0/1/2 · accepted 0 건도 종료값 0 · `make_collect_order.py` 가 pending CSV 두 장에서 대상을 만든다(작은 사본) |
-| `tests/test_collector_stage.py`(2단계) | `ORDER_READY→COLLECTING→BUILDING` 전이 허용 · `COLLECTING→REVIEWING` 거부 · `output.path` 가 allowed 밖이면 ORDER 거부 · `collected_files.json` 의 파일이 `max_files_changed` 셈에서 빠짐 · REVIEWER 프롬프트에 CSV diff 와 `collection` 집계가 들어감 · accepted 0 건이 HUMAN_REQUIRED 가 아님 |
+| `tests/test_collector_director_stage.py`(2단계 · 구현 2026-11-25) | `ORDER_READY→COLLECTING→BUILDING` 전이 허용 · `COLLECTING→REVIEWING` 거부 · `output.path` 가 allowed 밖이면 ORDER 거부 · `collected_files.json` 의 파일이 `max_files_changed` 셈에서 빠짐 · REVIEWER 프롬프트에 CSV diff 와 `collection` 집계가 들어감 · accepted 0 건이 HUMAN_REQUIRED 가 아님 |
 
 **통합 시험(opt-in · 기본 회귀 밖)** — `tests/test_collector_smoke.py`(`integration_cli`). 구스테이크528 · 식신 매거진 2770 · `address` → 「압구정로 108」이 accepted. 기본 `pytest -q` 는 돌리지 않는다
 
@@ -463,4 +498,4 @@ agy Argon high 는 한도 소진(429)으로 받지 못해 **fable 서브에이�
 2. `order.py` → `netfetch.py` → `verify.py` 를 **시험부터** 쓴다(§11 「검사기를 먼저 시험한다」) — 2026-11-09 구현
 3. `providers.py` · `outputs.py` · `cli.py` · `make_collect_order.py` — 2026-11-09 구현 · 연기 시험 `tests/test_collector_smoke.py`
 4. 스테이크 pending 129곳으로 실측 — 수락률 · 사유 코드 분포 · 호스트별 요청 수를 `summary.json` 으로 보고. 이 수치로 #3 · #6 을 다시 본다
-5. 2단계 — §10 표의 순서대로. `COLLECTING` 전이 시험을 먼저 넣는다
+5. 2단계 — §10 표의 순서대로. `COLLECTING` 전이 시험을 먼저 넣는다 — 2026-11-25 구현(§10.1). 실제 미션으로는 아직 돌리지 않았다

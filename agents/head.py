@@ -63,7 +63,10 @@ class BaseHead(ABC):
         '{"goal": string, "allowed_paths": string[], "protected_paths": string[], "acceptance_criteria": string[], '
         '"required_outputs": string[], "reference_paths": string[], "allowed_deletions": string[], '
         '"max_files_changed": integer, "max_diff_lines": integer, "context": string, '
-        '"risk_level": "LOW"|"MEDIUM"|"HIGH", "requires_human_approval": false}. '
+        '"risk_level": "LOW"|"MEDIUM"|"HIGH", "requires_human_approval": false, "collect": null | {"targets": '
+        '[{"id": "t1", "known": {"name": string, "area": string, "sido": string}, "fields": '
+        '["address"|"official_url"|"status"], "query_hint": string, "urls": string[]}], "output": {"schema": '
+        '"steak-sources-v1"|"generic-claims-v1", "path": "relative/new-file.csv"}}}. '
         'allowed_deletions entries are repo-relative file paths or symbols as "def:name" / "class:name" '
         '(not pytest node ids).'
     )
@@ -100,6 +103,12 @@ class BaseHead(ABC):
             "reference_paths ONLY for absolute paths of external documents the user supplied (repo files are always "
             "given to the Builder; never list them there); "
             "risk_level HIGH only for the escalation categories, an ambitious goal is MEDIUM.\n"
+            "WEB DATA: the Builder cannot read the web (a step that needed it stops with ENV_NO_WEB). When a step needs "
+            "facts from the web, put the targets and fields in the ORDER's \"collect\"; the Director fetches the pages "
+            "and only rows it verified against the fetched text are written to collect.output.path (a NEW .csv inside "
+            "allowed_paths, not protected) before the Builder runs. Each step result carries \"collection\" counts "
+            "(accepted / rejected / unverifiable); zero accepted rows means the file was not created. Never ask the "
+            "Builder to invent such data.\n"
             "Before you answer, check your ORDER against itself: every file in required_outputs must be inside "
             "allowed_paths and must NOT match protected_paths (a wildcard such as data/*.json also protects a new "
             "data/x.json).\n\n"

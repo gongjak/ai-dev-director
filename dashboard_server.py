@@ -221,7 +221,7 @@ def _mode_hint(mode: str, statuses: dict, candidates: list) -> str:
     return "insufficient providers" + (": " + "; ".join(parts) if parts else "")
 
 
-ACTIVE_STATES = {"PLANNING", "ORDER_READY", "BUILDING", "VERIFYING", "REVIEWING", "DECIDING"}
+ACTIVE_STATES = {"PLANNING", "ORDER_READY", "COLLECTING", "BUILDING", "VERIFYING", "REVIEWING", "DECIDING"}
 
 
 def _node_activity(state: str, providers: dict) -> dict:
@@ -229,7 +229,7 @@ def _node_activity(state: str, providers: dict) -> dict:
     ProviderManager.resolve_roles() recorded (current_role). No run in flight -> nothing is active."""
     def roles(dom):
         return [r.strip().upper() for r in str((providers.get(dom, {}) or {}).get("role", "") or "").replace("·", ",").split(",") if r.strip()]
-    stage = {"PLANNING": "HEAD", "ORDER_READY": "HEAD", "BUILDING": "BUILDER", "VERIFYING": "VERIFY",
+    stage = {"PLANNING": "HEAD", "ORDER_READY": "HEAD", "COLLECTING": "VERIFY", "BUILDING": "BUILDER", "VERIFYING": "VERIFY",
              "REVIEWING": "REVIEWER", "DECIDING": "HEAD"}.get(state)
     out = {"director": state in ACTIVE_STATES, "stage": stage, "nodes": {}}
     for dom in ("OPENAI", "ANTHROPIC", "GOOGLE"):
@@ -519,7 +519,7 @@ def inspect_run(run_id: str) -> dict:
                         file_diffs[f] = "(new untracked file)\n" + p.read_text(encoding="utf-8", errors="replace")[:4000]
         except Exception as e:
             diff_stat = [f"(diff unavailable: {e})"]
-    stage_order = ["PLANNING", "ORDER_READY", "BUILDING", "VERIFYING", "REVIEWING", "DECIDING"]
+    stage_order = ["PLANNING", "ORDER_READY", "COLLECTING", "BUILDING", "VERIFYING", "REVIEWING", "DECIDING"]
     executed = [t["to_state"] for t in trans if t["to_state"] in stage_order]
     resume_at = {"ENTRY": "ORDER_READY", "POST_BUILD": "VERIFYING"}.get(ap.get("stage"))
     upcoming = stage_order[stage_order.index(resume_at):] + ["FINAL_GATE"] if resume_at else []
@@ -720,7 +720,7 @@ def _start_mission(sid: str, orch: Orchestrator, project_path: str, goal: str, o
 
 
 _USAGE_BACKFILLED = {"done": False}
-STAGE_KO = {"PLANNING": "계획", "ORDER_READY": "구현 준비", "BUILDING": "코드 작성", "VERIFYING": "테스트",
+STAGE_KO = {"PLANNING": "계획", "ORDER_READY": "구현 준비", "COLLECTING": "웹 자료 수집", "BUILDING": "코드 작성", "VERIFYING": "테스트",
             "REVIEWING": "독립 검토", "DECIDING": "HEAD 판단", "PASS": "통과", "FAIL": "실패",
             "HUMAN_REQUIRED": "사용자 확인", "TIMEOUT": "시간 초과", "IDLE": "대기", "MISSION_PLANNING": "다음 단계 계획",
             "ENTRY_REVIEW": "오더 검토", "CHAT": "대화"}
@@ -735,7 +735,8 @@ def build_activity_payload(limit_missions: int = 5) -> dict:
     missions = sorted(store.all(), key=lambda m: m.get("updated_at", ""), reverse=True)
     if not _USAGE_BACKFILLED["done"]:
         try:
-            usage.backfill_from_runs(DIRECTOR_ROOT / "runs", missions)
+            from core.runs_dir import runs_root   # 포크: 산출물 위치는 한 곳에서 정한다
+            usage.backfill_from_runs(runs_root(), missions)
         except Exception:
             pass
         _USAGE_BACKFILLED["done"] = True
@@ -1233,7 +1234,8 @@ def build_status_payload() -> dict:
     state = raw_state
     recovered = None
     if current_run and raw_state == State.FAIL:
-        recovery_path = Path(__file__).resolve().parent / "runs" / current_run['run_id'] / "recovery.json"
+        from core.runs_dir import runs_root   # 포크: 산출물 위치는 한 곳에서 정한다
+        recovery_path = runs_root() / current_run['run_id'] / "recovery.json"
         try:
             candidate = json.loads(recovery_path.read_text(encoding="utf-8"))
             if candidate.get("status") == "VERIFIED" and candidate.get("project_path") == current_run['project_path']:
@@ -1523,7 +1525,7 @@ DASHBOARD_JS = r"""
   function scheduleStatus(ms) { if (pollStatusTimer) clearTimeout(pollStatusTimer); pollStatusTimer = setTimeout(function () { pollStatus(); }, ms); }
   function scheduleMessages(ms) { if (pollMsgTimer) clearTimeout(pollMsgTimer); pollMsgTimer = setTimeout(function () { pollMessages(); }, ms); }
   var STAGES = ['HEAD', 'BUILD', 'VERIFY', 'REVIEW', 'DECIDE'];
-  var STATE_INDEX = { PLANNING: 0, ORDER_READY: 0, BUILDING: 1, VERIFYING: 2, REVIEWING: 3, DECIDING: 4 };
+  var STATE_INDEX = { PLANNING: 0, ORDER_READY: 0, COLLECTING: 0, BUILDING: 1, VERIFYING: 2, REVIEWING: 3, DECIDING: 4 };
   var TERMINAL = { PASS: 1, RECOVERED: 1, FAIL: 1, HUMAN_REQUIRED: 1, TIMEOUT: 1 };
   var EVENT_LABELS = [
     [/RESULT_APPLIED/, 'RESULT APPLIED', 'ev-ok'], [/RESULT_ROLLED_BACK|RESULT_BLOCKED/, 'APPLY BLOCKED', 'ev-bad'], [/RESULT_DISCARDED/, 'RESULT DISCARDED', 'ev-info'],
@@ -1994,7 +1996,7 @@ DASHBOARD_JS = r"""
     var label = ko(I18N.state, runInfo.state || 'NONE') + (e ? ' \u00b7 ' + e : '');
     setText('run-label', label); setText('hdr-run-label', label);
     var rl0 = document.getElementById('run-label'); if (rl0) rl0.setAttribute('data-raw', runInfo.state || 'NONE');
-    var sl = document.getElementById('stage-sentence'); if (sl && runInfo.stage_sentence !== undefined) { var base = runInfo.stage_sentence || ''; var act = {PLANNING:1, ORDER_READY:1, BUILDING:1, VERIFYING:1, REVIEWING:1, DECIDING:1}[runInfo.state]; setText('stage-sentence', base + (act && e ? ' \u00b7 ' + e : '')); }
+    var sl = document.getElementById('stage-sentence'); if (sl && runInfo.stage_sentence !== undefined) { var base = runInfo.stage_sentence || ''; var act = {PLANNING:1, ORDER_READY:1, COLLECTING:1, BUILDING:1, VERIFYING:1, REVIEWING:1, DECIDING:1}[runInfo.state]; setText('stage-sentence', base + (act && e ? ' \u00b7 ' + e : '')); }
     var rl = document.getElementById('run-label'); if (rl) rl.className = 'status-' + runInfo.state;
     var hl = document.getElementById('hdr-run-label'); if (hl) hl.className = 'status-' + runInfo.state;
   }
@@ -2126,7 +2128,7 @@ DASHBOARD_JS = r"""
       window.__curProjectName = j.project_name || '';
       setText('session-label', j.session_id || '');
       serverBusy = !!j.head_busy; updateSendUi();
-      var active = {PLANNING:1, ORDER_READY:1, BUILDING:1, VERIFYING:1, REVIEWING:1, DECIDING:1}[(j.run || {}).state] || j.head_busy;
+      var active = {PLANNING:1, ORDER_READY:1, COLLECTING:1, BUILDING:1, VERIFYING:1, REVIEWING:1, DECIDING:1}[(j.run || {}).state] || j.head_busy;
       var need = (j.approval || {}).required || (j.human_required_count || 0) > 0;
       lastStatusMode = active ? 'active' : (need ? 'human' : 'idle');
       scheduleStatus(active ? 3000 : (need ? 5000 : 12000));
@@ -2217,7 +2219,7 @@ DASHBOARD_CSS = r"""
     .status-HEALTHY, .status-NORMAL, .status-PASS, .status-RECOVERED { color: var(--green); font-weight: 600; }
     .status-DEGRADED, .status-RECOVERING, .status-QUOTA_LOW, .status-UNKNOWN { color: var(--amber); font-weight: 600; }
     .status-STOP, .status-FAIL, .status-HUMAN_REQUIRED, .status-TIMEOUT, .status-QUOTA_EXHAUSTED, .status-AUTH_FAILED, .status-UNAVAILABLE, .status-CONFIG_ERROR { color: var(--red); font-weight: 600; }
-    .status-PLANNING, .status-ORDER_READY, .status-BUILDING, .status-VERIFYING, .status-REVIEWING, .status-DECIDING, .status-IDLE { color: var(--blue); font-weight: 600; }
+    .status-PLANNING, .status-ORDER_READY, .status-COLLECTING, .status-BUILDING, .status-VERIFYING, .status-REVIEWING, .status-DECIDING, .status-IDLE { color: var(--blue); font-weight: 600; }
     .status-NONE { color: var(--muted); }
     #system-mode, #core-mode { padding: 1px 8px; border-radius: 4px; border: 1px solid currentColor; font-size: 12px; }
     #system-mode-hint { color: var(--muted); font-size: 11px; margin-left: 6px; }

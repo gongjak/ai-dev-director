@@ -98,7 +98,7 @@ STATUS_TEXT: Dict[str, str] = {           # provider / mode statuses
 }
 
 STATE_TEXT: Dict[str, str] = {            # run states
-    "IDLE": "대기 중", "PLANNING": "요청 분석 중", "ORDER_READY": "작업 준비 완료", "BUILDING": "코드 작성 중",
+    "IDLE": "대기 중", "PLANNING": "요청 분석 중", "ORDER_READY": "작업 준비 완료", "COLLECTING": "웹 자료 수집 중", "BUILDING": "코드 작성 중",
     "VERIFYING": "테스트·검증 중", "REVIEWING": "코드 검토 중", "DECIDING": "최종 판단 중", "PASS": "완료",
     "FAIL": "실패", "FAILED": "실패", "RECOVERED": "복구 완료", "TIMEOUT": "시간 초과", "HUMAN_REQUIRED": "사용자 확인 필요", "NONE": "작업 없음",
 }
@@ -309,6 +309,7 @@ def stage_sentence(state: str, roles: Dict[str, str], elapsed: str = "") -> str:
     txt = {
         "PLANNING": f"{who('HEAD')}가 요청을 분석하고 있습니다",
         "ORDER_READY": "작업 사본을 준비하고 기준 테스트를 실행하고 있습니다",
+        "COLLECTING": "Director 가 웹 자료를 받아 검증하고 있습니다",
         "BUILDING": f"{who('BUILDER')}가 코드를 작성하고 있습니다",
         "VERIFYING": "테스트와 안전 검증을 실행하고 있습니다",
         "REVIEWING": f"{who('REVIEWER')}가 변경 내용을 검토하고 있습니다",
@@ -321,11 +322,11 @@ def stage_sentence(state: str, roles: Dict[str, str], elapsed: str = "") -> str:
         "IDLE": "대기 중입니다",
         "NONE": t("head_ready"),
     }.get(s, s)
-    return txt + (f" · {elapsed}" if elapsed and s in ("PLANNING", "ORDER_READY", "BUILDING", "VERIFYING", "REVIEWING", "DECIDING") else "")
+    return txt + (f" · {elapsed}" if elapsed and s in ("PLANNING", "ORDER_READY", "COLLECTING", "BUILDING", "VERIFYING", "REVIEWING", "DECIDING") else "")
 
 
 NEXT_STEP: Dict[str, str] = {
-    "PLANNING": "작업 사본 준비 및 기준 테스트", "ORDER_READY": "코드 작성", "BUILDING": "테스트 및 안전 검증",
+    "PLANNING": "작업 사본 준비 및 기준 테스트", "ORDER_READY": "코드 작성", "COLLECTING": "코드 작성", "BUILDING": "테스트 및 안전 검증",
     "VERIFYING": "코드 검토", "REVIEWING": "최종 판단", "DECIDING": "최종 안전 검사", "RECOVERED": "복구 결과 확인 완료",
 }
 

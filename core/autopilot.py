@@ -12,6 +12,7 @@ Everything else is auto-resolved: scope is NARROWED (never widened beyond what H
 failed calls are retried with feedback, unavailable providers are replaced (visibly, with an audit
 record), soft Scope Guard findings are waived or fed back into the repair loop.
 """
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -218,7 +219,19 @@ def required_output_path(entry: str) -> Optional[str]:
 
 def order_text(order: OrderSchema) -> str:
     """What the ORDER asks for (goal/context/criteria) - not its protection lists, which name secrets on purpose."""
-    return "\n".join([order.goal or "", order.context or "", *(order.acceptance_criteria or [])])
+    parts = [order.goal or "", order.context or "", *(order.acceptance_criteria or [])]
+    collect = getattr(order, "collect", None)
+    if collect is not None:                  # 포크: 수집 검색어도 같은 문구 검사(owner_policy)를 지난다
+        for t in collect.targets:
+            if not isinstance(t, dict):
+                continue
+            parts.append(str(t.get("query_hint") or ""))
+            # 4차 리뷰 G — known.* 은 검색어가 되고 urls 는 그대로 받는다. 둘 다 같은 문구 검사를 지난다
+            known = t.get("known")
+            parts.append(" ".join(str(v) for v in known.values()) if isinstance(known, dict) else "")
+            urls = t.get("urls")
+            parts += [str(u) for u in urls] if isinstance(urls, list) else []
+    return "\n".join(parts)
 
 
 def _code(reason: str) -> str:
@@ -252,6 +265,9 @@ def order_conflicts(order: OrderSchema) -> List[str]:
             problems.append(f"required output '{path}' is covered by this ORDER's own protected_paths")
         elif order.allowed_paths and not SafetyPolicy.is_path_allowed(path, order.allowed_paths):
             problems.append(f"required output '{path}' is not inside allowed_paths")
+    if getattr(order, "collect", None) is not None:      # 포크: 수집 지시도 같은 자리에서 본다(설계 COLLECTOR_DESIGN §10)
+        from core.collector import stage as collect_stage
+        problems.extend(collect_stage.spec_problems(order))
     return problems
 
 
@@ -312,7 +328,9 @@ def sanitize_order(order: OrderSchema, project_path: Optional[str]) -> Tuple[Ord
         notes.append("dropped invalid allowed_deletions")
     # reference_paths is for absolute paths of documents the user supplied; repo files already reach the Builder
     # as source context, and a relative entry makes the Builder reject the whole ORDER.
-    refs = [p for p in data.get("reference_paths") or [] if Path(str(p)).is_absolute()]
+    # 포크: '~/…' 는 홈으로 펴서 절대경로로 남긴다 — 펴지 않으면 상대경로로 보고 버린다
+    expanded = [os.path.expanduser(str(p)) if str(p).startswith("~/") else p for p in data.get("reference_paths") or []]
+    refs = [p for p in expanded if Path(str(p)).is_absolute()]
     if len(refs) != len(data.get("reference_paths") or []):
         notes.append("dropped repo-relative reference_paths (repo files are already supplied to the Builder)")
     data.update(allowed_paths=list(dict.fromkeys(allowed)), protected_paths=protected, allowed_deletions=deletions,

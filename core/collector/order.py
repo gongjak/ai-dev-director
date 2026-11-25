@@ -147,9 +147,17 @@ class CollectOrder(_Strict):
 
 
 def policy_reasons(order: CollectOrder) -> List[str]:
-    """purpose · query_hint 를 owner_policy 로 검사한다 — 걸리면 수집 자체를 거부."""
-    text = "\n".join([order.purpose] + [t.query_hint or "" for t in order.targets])
-    return hard_stop_reasons(text)
+    """purpose · query_hint · known.* · urls 를 owner_policy 로 검사한다 — 걸리면 수집 자체를 거부.
+    4차 리뷰 G — query_hint 가 없으면 known 의 sido · area · name 이 검색어가 되고(Target.hint), urls 는 그대로 받는다.
+    둘 다 HEAD 가 쓴 글이므로 같은 검사를 지난다. 칸마다 따로 본다 — 이웃한 칸의 낱말이 이어져 걸리지 않게."""
+    texts = [order.purpose]
+    for t in order.targets:
+        texts += [t.query_hint or "", " ".join(t.known.values()), *t.urls]
+    reasons: List[str] = []
+    for text in texts:
+        # URL 은 퍼센트 인코딩을 풀어 본다 — 「%EA%B2%B0%EC%A0%9C」 로 적어 문구 검사를 비켜 가지 못하게
+        reasons += [r for r in hard_stop_reasons(unquote(text)) if r not in reasons]
+    return reasons
 
 
 def parse_order(data: dict) -> CollectOrder:

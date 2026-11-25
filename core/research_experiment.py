@@ -70,7 +70,8 @@ class TriadExperimentOrchestrator(Orchestrator):
         existing = None if force else self.baseline_evidence(run_id)
         if existing is not None:
             return 0, None
-        if not allow_measure or not self._worktree_is_pristine(worktree_path):
+        if not allow_measure or not self._worktree_is_pristine(
+                worktree_path, ignore=self._collected_unchanged(run_id, worktree_path)):
             msg = "GREENFIELD_BASELINE_INVALID: isolated worktree is missing or not pristine before Builder"
             return None, self._stop(
                 run_id, State.HUMAN_REQUIRED, msg, logger, provenance_records, "GREENFIELD_BASELINE_INVALID"

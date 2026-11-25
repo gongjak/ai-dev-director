@@ -17,7 +17,9 @@ from core.result_manager import ResultManager
 from core.state_machine import StateMachine, State
 from tests.test_v301_companion_http import http_server, request  # noqa: F401
 
-RUNS = Path(__file__).resolve().parents[1] / "runs"
+from core.runs_dir import runs_root
+
+RUNS = runs_root()   # 포크: conftest 가 임시 폴더로 돌린다
 
 
 def git(cwd, *a):

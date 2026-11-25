@@ -17,9 +17,9 @@ const PHASE={
   VERIFYING:{word:'테스트',sub:'Director가 직접 실행해 확인합니다',core:1},
   REVIEWING:{word:'검수',sub:'REVIEWER가 독립적으로 살핍니다',core:.72},
   DECIDING:{word:'판단',sub:'HEAD가 통과 여부를 결정합니다',core:.86}};
-const STAGE_TEXT={CHAT:'요청을 읽고 있습니다',MISSION_PLANNING:'다음 단계를 계획하고 있습니다',PLANNING:'작업 지시서를 쓰고 있습니다',ORDER_READY:'작업 지시서를 쓰고 있습니다',
+const STAGE_TEXT={CHAT:'요청을 읽고 있습니다',MISSION_PLANNING:'다음 단계를 계획하고 있습니다',PLANNING:'작업 지시서를 쓰고 있습니다',ORDER_READY:'작업 지시서를 쓰고 있습니다',COLLECTING:'웹 자료를 받아 검증하고 있습니다',
   BUILDING:'코드를 작성하고 있습니다',REVIEWING:'결과물을 검수하고 있습니다',DECIDING:'통과 여부를 판단하고 있습니다'};
-const SHORT={CHAT:'요청 확인 중',MISSION_PLANNING:'다음 단계 계획 중',PLANNING:'지시서 작성 중',ORDER_READY:'지시서 작성 중',BUILDING:'코드 작성 중',REVIEWING:'검수 중',DECIDING:'판단 중'};
+const SHORT={CHAT:'요청 확인 중',MISSION_PLANNING:'다음 단계 계획 중',PLANNING:'지시서 작성 중',ORDER_READY:'지시서 작성 중',COLLECTING:'웹 자료 수집 중',BUILDING:'코드 작성 중',REVIEWING:'검수 중',DECIDING:'판단 중'};
 const STATE_KO={PASS:'통과',FAIL:'실패',TIMEOUT:'시간 초과',HUMAN_REQUIRED:'확인 필요',RECOVERED:'복구 완료'};
 const STEP_CLASS={PASS:'ok',RECOVERED:'ok',FAIL:'bad',TIMEOUT:'bad',HUMAN_REQUIRED:'warn'};
 const MISSION_BADGE={DONE:['완료','ok'],INCOMPLETE:['예산 소진','warn'],BLOCKED:['확인 필요','warn'],FAILED:['실패','bad']};

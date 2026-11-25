@@ -104,8 +104,8 @@ class Orchestrator:
         return CodexReviewer(provider="openai", model=model, executable=executable, timeout=timeout, no_progress_timeout=no_progress_timeout, heartbeat_interval=heartbeat_interval)
 
     def _get_run_dir(self, run_id: str) -> Path:
-        base_dir = Path(__file__).resolve().parent.parent
-        run_dir = base_dir / "runs" / run_id
+        from core.runs_dir import runs_root   # 포크: DIRECTOR_RUNS_DIR 로 옮길 수 있다(기본은 저장소 runs/)
+        run_dir = runs_root() / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "logs").mkdir(exist_ok=True)
         return run_dir
@@ -386,6 +386,56 @@ class Orchestrator:
         self.sm.transition_to(run_id, state, details=details)
         return self._build_run_summary(run_id, scope_violations=violations if violations is not None else [details])
 
+    def _collected_unchanged(self, run_id: str, worktree_path: Optional[str]) -> set:
+        """포크: 이 실행에서 Director 가 놓았고 그 뒤 바뀌지 않은 수집 파일(설계 COLLECTOR_DESIGN §10)."""
+        try:
+            record = self._load_json(run_id, "collected_files.json")
+            if not record or not worktree_path:
+                return set()
+            from core.collector import stage as collect_stage
+            return collect_stage.unchanged_paths(record, worktree_path)
+        except Exception:
+            return set()
+
+    def run_collect_stage(self, run_id: str, order: OrderSchema, worktree_path: str, logger: logging.Logger,
+                          provenance_records: list) -> Optional[Dict[str, Any]]:
+        """포크: 웹 자료 수집(Collector) — 기준선 뒤 · Builder 앞. ORDER 에 collect 가 없으면 아무것도 하지 않는다.
+        Director 코드가 받고 haiku 가 뽑고 verify 가 대조한 행만 collect.output.path 에 놓인다.
+        수집 0건은 멈추지 않는다(HEAD 가 판단한다) — 공급자 실패만 멈춘다. 멈춰야 하면 요약을, 아니면 None."""
+        if getattr(order, "collect", None) is None:
+            return None
+        from core.collector import stage as collect_stage
+        if (self.sm.get_run(run_id) or {}).get("current_state") != State.COLLECTING:
+            self.sm.transition_to(run_id, State.COLLECTING, details="Director collecting web data (Collector)")
+        logger.info("State -> COLLECTING")
+        try:
+            res = collect_stage.run_stage(order, worktree_path, self._get_run_dir(run_id),
+                                          factory=getattr(self, "_collector_factory", None),
+                                          previous=self._load_json(run_id, "collected_files.json"))
+            # 기록까지가 수집이다 — 파일을 놓고 기록을 못 쓰면 그것도 수집 실패다
+            self._save_json(run_id, "collected_files.json", res["record"])
+            self._save_json(run_id, "collection.json", res["counts"])
+        except collect_stage.CollectStop as exc:
+            return self._stop(run_id, exc.state, f"{exc.code}: {exc}", logger, provenance_records, exc.code)
+        except AssertionError:               # 시험의 네트워크 차단은 삼키지 않는다
+            raise
+        except Exception as exc:
+            # 4차 리뷰 H — 뜻밖의 예외가 그대로 올라가면 실행이 COLLECTING 에 멈춘 채 남는다. FAIL 로 닫는다
+            return self._stop(run_id, State.FAIL, f"COLLECT_INTERNAL_ERROR: {type(exc).__name__}: {exc}"[:600],
+                              logger, provenance_records, "COLLECT_INTERNAL_ERROR")
+        self.sm.log_audit(run_id, "ORCHESTRATOR", "COLLECTED", json.dumps(res["counts"], ensure_ascii=False))
+        logger.info(f"[Collector] {json.dumps(res['counts'], ensure_ascii=False)}")
+        if res["status"] == "PROVIDER_FAILURE":
+            err = res.get("stderr_tail") or res.get("provider_fatal") or "collector LLM calls all failed"
+            stop = self._handle_provider_failure("ANTHROPIC", err, run_id, "COLLECTING", logger, provenance_records)
+            if stop:
+                return stop
+            return self._stop(run_id, State.HUMAN_REQUIRED,
+                              f"PROVIDER_FAILURE: Collector (claude haiku) produced no usable answer "
+                              f"({res.get('provider_fatal') or 'all calls failed'}); nothing was collected.",
+                              logger, provenance_records, "COLLECT_PROVIDER_FAILURE")
+        return None
+
     def _verification_cmds(self):
         v = self.config.get("verification", {}) or {}
         return v.get("build_command"), v.get("test_command"), v.get("lint_command")
@@ -421,11 +471,15 @@ class Orchestrator:
             return None
         return data
 
-    def _worktree_is_pristine(self, worktree_path: Optional[str]) -> bool:
-        """True only when the worktree exists and git reports no modifications (proof that the builder has not run)."""
+    def _worktree_is_pristine(self, worktree_path: Optional[str], ignore=None) -> bool:
+        """True only when the worktree exists and git reports no modifications (proof that the builder has not run).
+        포크: ignore 는 Director 가 놓은 수집 파일(collected_files.json · 놓은 그대로인 것)이다 — 그것만 빼고 본다."""
         try:
             if not worktree_path or not Path(worktree_path).exists():
                 return False
+            if ignore:                       # git 이 실패하면 예외 → False(깨끗하다고 보지 않는다)
+                # 4차 리뷰 J — 이름 바꾸기는 양쪽 자리를 다 세고, 경로는 글자 그대로 견준다(GitManager.status_paths)
+                return not [p for p in GitManager.status_paths(worktree_path) if p not in ignore]
             return GitManager.get_status(worktree_path).strip() == ""
         except Exception:
             return False
@@ -441,7 +495,7 @@ class Orchestrator:
             if not allow_measure:
                 msg = "BASELINE_MISSING: no persisted baseline evidence for this run and the worktree may already be modified; a baseline cannot be measured now."
                 return None, self._stop(run_id, State.HUMAN_REQUIRED, msg, logger, provenance_records, "BASELINE_MISSING")
-            if not self._worktree_is_pristine(worktree_path):
+            if not self._worktree_is_pristine(worktree_path, ignore=self._collected_unchanged(run_id, worktree_path)):
                 msg = "BASELINE_MISSING: worktree is not provably untouched (git status not clean); refusing to measure a baseline on possibly modified files."
                 return None, self._stop(run_id, State.HUMAN_REQUIRED, msg, logger, provenance_records, "BASELINE_MISSING")
             build_cmd, test_cmd, lint_cmd = self._verification_cmds()
@@ -706,15 +760,49 @@ class Orchestrator:
             hits.append(".director_worktrees/ (unreadable)")
         return hits
 
+    @staticmethod
+    def _diff_without(raw_git_diff: str, paths) -> str:
+        """paths 에 든 파일의 구간(`diff --git` 부터 다음 `diff --git` 앞까지)을 뺀 diff."""
+        paths = {str(p).replace("\\", "/") for p in paths or ()}
+        if not paths or not raw_git_diff:
+            return raw_git_diff
+        out, skip = [], False
+        for line in raw_git_diff.splitlines(keepends=True):
+            if line.startswith("diff --git "):
+                # 'diff --git a/<경로> b/<경로>' — 두 경로가 같은 꼴(이름 바꾸기가 아님)일 때만 뺀다
+                body = line[len("diff --git "):].rstrip("\r\n")
+                skip = any(body == f"a/{p} b/{p}" or body == f'"a/{p}" "b/{p}"' for p in paths)
+            if not skip:
+                out.append(line)
+        return "".join(out)
+
     def validate_post_build(self, run_id: str, order: OrderSchema, worktree_path: str, baseline_pass_count: int,
                             logger: logging.Logger, provenance_records: list):
         """Post-build Scope Guard (canonical containment in the worktree) -> verification -> baseline regression gate.
         Returns (verification, stop)."""
+        # 포크(4차 리뷰 D): Builder 가 수집 파일을 고치거나 지웠으면 여기서 멈춘다 — 범위 판정 · 시험 · 리뷰보다 먼저.
+        # 그대로 두면 REVIEWER 가 「Director 가 모든 행을 검증했다」는 줄과 함께 Builder 가 지어낸 행을 받는다.
+        from core.collector import stage as collect_stage
+
+        def collected_tamper_stop(when):
+            tampered = collect_stage.modified_paths(self._load_json(run_id, "collected_files.json"), worktree_path)
+            if not tampered:
+                return None
+            msg = (f"COLLECTED_FILE_MODIFIED: a file the Director collected and verified was modified or removed {when} ("
+                   + ", ".join(tampered) + "); collected rows must stay byte-identical - derive a new file instead")
+            return self._stop(run_id, State.FAIL, msg, logger, provenance_records, "COLLECTED_FILE_MODIFIED", [msg])
+        stop = collected_tamper_stop("by the Builder")
+        if stop:
+            return None, stop
         diff = GitManager.get_diff(worktree_path)
         numstat = GitManager.get_numstat(worktree_path)
         untracked = GitManager.get_untracked_files(worktree_path)
         deleted_files = GitManager.get_deleted_files(worktree_path)
         artifacts = set(self._load_json(run_id, "verification_artifacts.json") or []) if self._proxy() else set()
+        # 포크: Director 가 놓은 수집 파일은 Builder 변경이 아니다 — proxy 여부와 무관하게 파일 수 · diff 줄 수에서 뺀다.
+        # diff 는 위에서 이미 뽑았으므로 REVIEWER 는 행을 그대로 본다. Builder 가 고친 파일은 빠지지 않는다(sha256).
+        collected = self._collected_unchanged(run_id, worktree_path)
+        artifacts = artifacts | collected
         if artifacts:
             def builder_change(p):
                 p = str(p).replace("\\", "/")
@@ -759,14 +847,25 @@ class Orchestrator:
             except OSError:
                 pass
         from core import owner_policy
-        money, _ = SafetyPolicy.apply_waivers(autopilot.money_code_findings(diff, new_files)
-                                               + owner_policy.code_findings(diff, new_files), waivers)
+        # 포크(4차 리뷰 F): 그대로인 수집 파일의 행은 코드가 아니다 — 웹에서 온 글(상호 · 주소)이 코드 규칙에 걸려
+        # 실행을 멈추지 않게 두 검사에서만 뺀다. REVIEWER 가 보는 diff 는 그대로다. new_files 는 위에서 이미 걸렀다
+        code_diff = self._diff_without(diff, collected)
+        money, _ = SafetyPolicy.apply_waivers(autopilot.money_code_findings(code_diff, new_files)
+                                               + owner_policy.code_findings(code_diff, new_files), waivers)
         if money:
             msg = "Scope violation: " + "; ".join(money)
             logger.warning(f"Money-moving code detected before test execution: {msg}")
             return None, self._stop(run_id, State.HUMAN_REQUIRED, msg, logger, provenance_records, "LIVE_MONEY_CODE", money)
 
         verification = self._verify(run_id, worktree_path)
+        # 포크(4차 리뷰 D): 시험이 도는 동안에도 수집 파일이 바뀔 수 있다(Builder 가 쓴 시험이 CSV 에 행을 덧붙인다) —
+        # 집계를 리뷰어 증거에 싣기 전에 한 번 더 본다
+        stop = collected_tamper_stop("while the verification commands ran")
+        if stop:
+            return None, stop
+        collection = self._load_json(run_id, "collection.json")
+        if collection:                       # 포크: 수집 집계(숫자 · 사유 코드만)를 REVIEWER · HEAD 증거에 싣는다
+            verification["collection"] = collection
         if repairable:
             verification['passed'] = False
             verification['scope_repairs'] = repairable
@@ -1534,6 +1633,11 @@ class Orchestrator:
         if stop:
             return stop
 
+        # 3.2 포크: 웹 자료 수집(선택) — 기준선 뒤여야 한다(앞이면 worktree 가 깨끗하지 않아 기준선을 못 잰다)
+        stop = self.run_collect_stage(run_id, order, worktree_path, logger, provenance_records)
+        if stop:
+            return stop
+
         # 4. State: ORDER_READY -> BUILDING
         self.sm.transition_to(run_id, State.BUILDING, details="Antigravity executing in worktree")
         logger.info("State -> BUILDING")
@@ -1758,7 +1862,7 @@ class Orchestrator:
             if stop:
                 return stop
 
-        if curr_state == State.ORDER_READY:
+        if curr_state in (State.ORDER_READY, State.COLLECTING):   # 포크: COLLECTING 은 처음부터 다시 수집한다(멱등)
             if not worktree_path or not Path(worktree_path).exists():
                 try:
                     mission_base = (self._load_json(run_id, 'mission_base.json') or {}).get('base_worktree')
@@ -1780,6 +1884,9 @@ class Orchestrator:
                 return stop
             # ORDER_READY is the only state in which a baseline may still be measured (worktree provably untouched)
             baseline_pass_count, stop = self.run_baseline_if_required(run_id, worktree_path, logger, provenance_records, allow_measure=True)
+            if stop:
+                return stop
+            stop = self.run_collect_stage(run_id, order, worktree_path, logger, provenance_records)
             if stop:
                 return stop
             self.sm.transition_to(run_id, State.BUILDING, details="Resumed: Starting builder")

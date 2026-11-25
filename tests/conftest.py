@@ -23,6 +23,10 @@ else:
         fh.write("#!/bin/sh\necho stub-cli 0.0.0-test\n")
     os.chmod(_STUB_CLI, 0o755)
 
+# 포크: 실행 산출물(runs/<RUN-id>/)을 세션마다 임시 폴더에 쓴다 — 시험이 저장소 runs/ 에 폴더를 쌓지 않게.
+# 모듈 수준에서 os.environ 에 넣어 시험이 띄우는 하위 프로세스도 물려받게 한다.
+os.environ["DIRECTOR_RUNS_DIR"] = tempfile.mkdtemp(prefix="director_runs_")
+
 _RESOLVE_CLI_SITES = (
     "core.provider_manager.resolve_cli",
     "agents.codex_head.resolve_cli",

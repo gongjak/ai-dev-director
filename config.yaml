@@ -37,7 +37,7 @@ timeouts:
 safety:
   # A document outside the project is handed to the Builder only when it lives in one of these folders.
   # Example: reference_roots: ["D:/work/specs"]
-  reference_roots: []
+  reference_roots: ["/Users/sungjaeyun/Developer/oss", "/Users/sungjaeyun/Developer/personal", "/Users/sungjaeyun/Developer/experiments"]   # 포크: 이 기계의 코드 루트
   max_files_changed: 15
   max_diff_lines: 1500     # Complete greenfield modules commonly exceed 800; path/file caps still apply.
   approved_commands:
@@ -77,12 +77,12 @@ autonomy:
   builder_attempts: 3          # retry with feedback; the last attempt moves to another provider
   max_steps: 6                 # milestones per mission
   max_consecutive_failures: 3
-  resume_on_start: false       # true: a companion restart continues interrupted (RUNNING) missions on its own
+  resume_on_start: true        # true: a companion restart continues interrupted (RUNNING) missions on its own
   # A finished mission is applied to the project on its own:
   # off | on_done (only when HEAD declared the goal done) | on_pass (any PASSED deliverable).
   # Apply never overwrites a file the operator changed meanwhile (conflict -> blocked, worktree kept) and never deletes.
   # Default "off": you press 반영 after looking at the result.
-  auto_apply: "off"
+  auto_apply: on_pass         # 포크: 병합 전 동작을 유지한다
   profiles:                    # budgets per request size; gates and Scope Guard are the same in every profile
     quick:    {max_steps: 2, max_repairs: 1, builder_attempts: 2}
     standard: {max_steps: 6, max_repairs: 3, builder_attempts: 3}
@@ -92,6 +92,8 @@ autonomy:
 # Only git projects under allowed_roots may be targeted; the Director's own folder is never a target.
 solomon:
   allowed_roots:
-    - "D:/work"
+    - "/Users/sungjaeyun/Developer/oss"
+    - "/Users/sungjaeyun/Developer/personal"
+    - "/Users/sungjaeyun/Developer/experiments"
   denied:
-    - "D:/work/ai-dev-director"
+    - "/Users/sungjaeyun/Developer/experiments/ai-dev-director"

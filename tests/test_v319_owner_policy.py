@@ -153,4 +153,4 @@ def test_claude_command_lines_carry_model(monkeypatch):
     monkeypatch.delenv("DIRECTOR_CLAUDE_MODEL", raising=False)
     from core.research_runner import TriadResearchRunner
     cmd, _, _ = TriadResearchRunner(executables={})._command("ANTHROPIC", "/x/claude", "hi")
-    assert cmd[-2:] == ["--model", "opus"]
+    i = cmd.index("--model"); assert cmd[i + 1] == "opus"  # 읽기 전용 플래그가 끝에 와야 해서 위치는 보지 않는다

@@ -1,7 +1,7 @@
 ---
 title: "포크 변경 기록 — gongjak/ai-dev-director"
 date: 2026-11-09
-modified: 2026-11-09
+modified: 2026-11-25
 tags:
   - type/changelog
   - scope/dev
@@ -24,6 +24,7 @@ source: claude
 | 2026-11-08 | `e6e1ef5` | 콘솔을 `companion.json` 의 host(Tailscale 주소)에 묶는다 · `0.0.0.0` 거부 · 시작 스크립트는 `.venv` 파이썬 |
 | 2026-11-09 | `5384978` | 빌더 교체 순서를 설정으로 고정 — agy 를 못 쓰면 claude → codex |
 | 2026-11-09 | `374104e` | 적용 관문 결함 — HEAD 프록시가 P2 만 남기고 PASS 한 결과도 적용할 수 있게 한다 |
+| 2026-11-25 | (미커밋) | Collector 2단계 — Director 가 Builder 앞에서 웹 자료를 모아 검증한 행만 worktree 에 놓는다 |
 
 ## 2026-11-09 — 빌더 교체 순서 (agy → claude → codex)
 
@@ -58,3 +59,74 @@ source: claude
 
 - **빌더는 웹을 읽지 못한다** — `config.yaml` `builder.mode: proposal` · `agents/proposal_builder.py` 지시문 「Do not use tools」. 자료 수집이 필요한 미션은 데이터 없이 코드만 고치다 연속 실패로 멈춘다(스테이크 지도 4단계 `ENV_NO_WEB`). 수집 단계를 따로 두는 설계를 검토 중이다
 - **미션 종료 때 자동 적용이 `duplicate` 로 끝난다** — 감사 기록으로 잰 경위: 16:02 KST 미션 종료 때 `auto-MSN-…` 요청이 위 적용 관문 결함으로 `RESULT_APPLY_BLOCKED`. 16:44 미션이 다시 끝나며(`_finish`) `_auto_apply` 가 **같은 요청 번호**를 다시 써서 메모리의 중복 방지(`_RECENT_APPLY_REQUESTS`)에 걸렸다. 관문 결함이 풀렸으니 새 미션에서는 첫 호출이 적용된다. 다만 막힌 적용을 다시 시도할 때도 같은 번호를 쓰는 점은 남아 있다 — 고치려면 요청 번호에 시도 시각을 붙인다(아직 고치지 않음)
+
+## 2026-11-25 — Collector 2단계 (Director 가 웹 자료를 모아 Builder 앞에 놓는다)
+
+- **무엇** — ORDER 에 `collect`(대상 · 필드 · `output.path`)가 있으면 Director 가 기준선 뒤 · Builder 앞에서 Collector 를 돌린다. Director 코드가 페이지를 받고, haiku 가 값을 뽑고, `verify.py` 가 받은 본문과 대조한 행만 worktree 의 `collect.output.path` 에 CSV 로 놓는다. 새 상태 `COLLECTING`. REVIEWER 는 diff 에서 그 행을 보고 집계(받아들임 · 거부 · 검증 불가)를 함께 받는다
+- **왜** — Builder 는 웹을 읽지 못해 자료가 필요한 미션이 `ENV_NO_WEB` 으로 멈췄다(아래 「2026-11-09 관찰」 첫 줄). 1단계(독립 CLI · `core/collector/`)만으로는 미션이 그것을 쓰지 못했다. 설계 `docs/COLLECTOR_DESIGN.md` §10 · 구현 기록 §10.1
+- **파일**
+  - 새로 — `core/collector/stage.py`(지시서 만들기 · 자리 검사 · worktree 에 놓기 · 집계) · `tests/test_collector_director_stage.py`
+  - `schemas/order.py` — `CollectSpec` · `OrderSchema.collect`
+  - `core/state_machine.py` — `COLLECTING` 과 전이 둘
+  - `core/orchestrator.py` — `run_collect_stage()` · `_collected_unchanged()` · `run()` / `resume()` 에서 부르는 줄 · `validate_post_build` 의 범위 셈에서 수집 파일 빼기와 `verification["collection"]` · `_worktree_is_pristine(ignore=)`
+  - `core/autopilot.py` — `order_conflicts()` 가 collect 를 본다 · `order_text()` 에 검색어
+  - `core/research_experiment.py` — pristine 판정에 같은 `ignore`
+  - `core/mission.py` — step 결과에 `collection` 숫자
+  - `agents/head.py` — `ORDER_SCHEMA_TEXT` 의 `collect` 칸 · `plan_next` 한 단락
+  - `agents/codex_reviewer.py` · `agents/claude_reviewer.py` — 프롬프트에 `WEB COLLECTION` 한 줄(수집이 없으면 그대로)
+  - `agents/proposal_builder.py` — 수집 CSV 를 소스에 싣는다(`data/` 를 건너뛰는 걸음 때문에 설계의 「별도 변경 없음」이 틀렸다)
+  - `dashboard_server.py` · `dashboard_i18n.py` · `console/console.js` · `console/stage.js` — 상태 목록에 `COLLECTING`
+- **정한 것**(설계가 열어 둔 자리 · 닫힌 쪽) — 받아들인 행 0 이면 파일을 놓지 않는다 · 있는 파일은 덮지 않는다 · 범위 셈에서 빼는 것은 놓은 그대로(sha256)인 파일뿐 · 기본 거부 도메인은 HEAD 가 풀 수 없다 · HEAD · REVIEWER 에게는 숫자와 사유 코드만 · 공급자가 한 번도 성공하지 못한 때만 `PROVIDER_FAILURE` 로 멈춘다 · 수집을 시작하는 것은 ORDER 의 `collect` 뿐이다(`ENV_NO_WEB` 만으로 자동 수집하지 않는다 — 대상이 없다)
+- **시험** — `tests/test_collector_director_stage.py` 29건(가짜 전송 + stub haiku · 실제 네트워크 · CLI 없음 · HEAD 프록시를 켠 미션 한 건 포함). 지어낸 값과 범위 밖 경로가 worktree 에 놓이지 않는지를 먼저 본다. sha256 대조와 「0 행이면 파일 없음」을 꺼 보면 시험 3건이 실패하는 것을 확인했다. 전체 882 통과 · 1 실패(2026-11-25 · 새 시험 27건이던 때) — 실패 `test_v319_owner_policy.py::test_claude_command_lines_carry_model` 은 `--model opus` 가 명령 끝에 온다고 단언하던 옛 시험 줄이고(같은 날 다른 작업이 고쳤다) 이 변경과 무관하다. 다시 돌리면 통과한다. 그 뒤 더한 2건은 이 파일만 다시 돌려 29 통과
+- **리뷰** — agy Neon high + fable 서브에이전트(codex 는 한도). 지적 11건 모두 CONFIRMED · 고쳤다 — 아래 「리뷰 결과 — 4차」
+- **주의** — 실제 미션 · 실제 네트워크로는 돌리지 않았다. 원본을 합칠 때 `core/orchestrator.py` 의 `run()` · `resume()` · `validate_post_build` 에 넣은 「포크:」 줄을 지킨다
+
+
+## 2026-11-25 — 참조 경로 `~` · 참조 폴더 스냅샷 · 시험의 runs/ 격리
+
+- **왜**
+  - ORDER 에 `~/Developer/oss/map-hub/README.md` 처럼 홈을 줄여 쓴 경로는 문서로 알아보지 못했다(정규식이 낱말 첫머리의 `/` 만 봤다)
+  - 참조는 `.md` · `.txt` · `.docx` 파일 하나씩만 됐다. 「이 폴더를 참고해 만든다」가 되지 않았다
+  - 시험을 돌릴 때마다 저장소 `runs/` 에 `RUN-…` 폴더가 쌓였다(재던 날 4,691개)
+- **바꾼 것**
+  - `core/builder_context.py`
+    - `~/…` 를 홈으로 펴서 알아본다 — 글 속 표기 · `reference_paths` · `safety.reference_roots` 설정값 모두. `~남의이름/…` · `a~/x.md` 는 경로로 치지 않는다. 허용 루트 검사는 편 뒤의 실제 경로에 그대로 건다
+    - ORDER 가 **폴더**를 가리키면(`reference_paths` 의 폴더 · 글 속의 실제로 있는 `/…` · `~/…` 폴더) 읽기 전용 스냅샷을 파일마다 한 항목으로 넘긴다. `폴더경로/` 항목은 안내문(넘긴 수 · 한도로 빠진 파일 이름)이다
+    - 넘기는 것 — `.py .ts .tsx .js .jsx .cjs .mjs .md .txt .json .yaml .yml .toml` 뿐. 숨김 폴더(`.git` · `.venv`) · `node_modules` · `__pycache__` · `venv` · `dist` · `build` · 심볼릭 링크 · UTF-8 이 아닌 파일은 뺀다. 이름이 `.env*` · `*.pem` · `*.key` 이거나 `key` 가 든 파일, 경로에 `secret` · `credential` · `token` · `private_key` · `password` 가 든 파일도 뺀다(`keyboard.py` 같은 이름도 빠진다 — 넓게 막는 쪽을 골랐다)
+    - 한도 — 폴더당 파일 60개 · 파일당 100,000바이트 · 폴더당 120,000자 · 문서와 합쳐 200,000자 · 훑는 파일 5,000개. 한도에 닿으면 예외 없이 정렬 순서에서 자르고 이름만 알린다
+    - 허용 루트 밖의 폴더 · 심볼릭 링크 폴더는 `REFERENCE_INPUT_UNAVAILABLE` 로 거부한다(fail-closed). 파일마다 풀어 본 실제 위치가 루트 안인지 다시 본다. 참조 폴더에는 아무것도 쓰지 않는다
+    - 프로젝트 자신 · 그 하위 · 글 속에 나온 프로젝트의 윗폴더는 참조로 치지 않는다(`project_roots()` — 빌더가 이미 소스로 받는다)
+  - `agents/proposal_builder.py` — `project_roots` 를 넘긴다 · `core/autopilot.py` `sanitize_order` — `reference_paths` 의 `~/…` 를 펴서 남긴다(전에는 상대경로로 보고 버렸다)
+  - `core/runs_dir.py`(새 파일) `runs_root()` — 환경변수 `DIRECTOR_RUNS_DIR` 가 있으면 그 폴더, 없으면 전과 같이 저장소 `runs/`. `core/orchestrator.py` `_get_run_dir` · `core/result_manager.py` `run_dir` · `dashboard_server.py` 두 곳이 이것을 쓴다
+  - `tests/conftest.py` — 세션마다 임시 폴더를 `DIRECTOR_RUNS_DIR` 로 건다. `Path("runs")` 를 하드코딩한 시험 일곱 파일(`test_v0231` · `v0234` · `v0235` · `v0236` · `v0239` · `v0247` · `v312`)을 `runs_root()` 로 바꿨다
+- **시험** — `tests/test_fork_reference_folders.py` 13건 · `tests/test_fork_runs_dir.py` 3건(고치기 전 13건 실패를 확인). 전체 855 통과 · 1 실패 · 3 제외(478초). 실패 `test_v319_owner_policy.py::test_claude_command_lines_carry_model` 은 이 변경과 무관하다 — `core/env_utils.py` 가 명령 끝에 `--mcp-config` 를 붙여 `--model opus` 가 끝에서 밀린다(두 파일 모두 이 작업에서 손대지 않았다). 수집 단계에서 깨진 `tests/test_collector_director_stage.py`(같은 때 진행 중인 Collector 연결 작업)는 빼고 돌렸다
+- **확인** — 전체 시험 전후 저장소 `runs/` 폴더 수 4,691 → 4,691 · 시험 시작 뒤에 바뀐 항목 0개(`find runs -newer <표지>`)
+- **주의**
+  - ~~글 속에 실제로 있는 폴더가 허용 루트 밖이면 ORDER 를 거부한다~~ → 4차 리뷰 A 로 바꿨다. 폴더는 `goal` 과 `reference_paths` 에서만 알아보고, `goal` 에 이름만 나온 루트 밖 폴더 · 심볼릭 링크(`/tmp`)는 건너뛴다. 명시한 `reference_paths` 만 닫힌 쪽으로 거부한다
+  - 실행 중인 디렉터 프로세스에는 다시 띄운 뒤에 적용된다
+
+### 리뷰 결과 — 4차 (2026-11-25 · agy Neon high + fable 서브에이전트 · codex 는 한도)
+
+위 두 절(Collector 2단계 · 참조 폴더 · runs 격리)의 커밋 전 변경을 함께 받았다. 지적마다 재현 시험을 먼저 쓰고(고치기 전 실패 확인) 고쳤다. 판정은 재현 결과다.
+
+| # | 지적 | 판정 | 고친 것 |
+|---|---|---|---|
+| A | 폴더 표기를 `order.context` 까지 훑는다 — 수리 라운드의 pytest 출력 · 리뷰 글에 나온 임시 폴더 · `/tmp` 가 `REFERENCE_INPUT_UNAVAILABLE` 로 실행을 죽이고, 루트 안 폴더는 조용히 스냅샷으로 나간다 | CONFIRMED | 폴더는 `goal` · `reference_paths` 에서만 알아본다. `goal` 에 이름만 나온 것이 루트 밖 · 심볼릭 링크면 건너뛴다. 명시한 참조는 그대로 거부 |
+| B | `safety.reference_roots` 의 `~/Developer/experiments` 가 Director 자신(`runs/` · `data/` · `config.yaml`)을 품는다 | CONFIRMED | `denied_roots()` — Director 루트와 `solomon.denied` 를 코드에서 늘 뺀다. 윗폴더를 참조해도 걸어 들어가지 않는다. 프로젝트 자신은 예외(Director 저장소가 작업 대상일 때) |
+| C | 비밀 걸러내기가 폴더 「안쪽」 상대경로 · 이름만 본다 — `…/secrets` 를 바로 가리키면 통과, `config.yaml` 의 `api_key:` 도 통과 | CONFIRMED | 폴더 자신의 경로 구성요소(허용 루트 아래 · 숨김 + 비밀 낱말) 검사 · 내용 검사(개인키 머리글 · `sk-` 등 토큰 꼴 · 설정 파일의 `키: 값` · 코드의 따옴표 대입 — 걸린 파일은 이름만 알린다) · 낱개 문서 경로에도 이름 검사 |
+| D | Builder 가 수집 CSV 를 고쳐도 리뷰어 줄 「Director 가 검증했다」가 그대로 붙는다 | CONFIRMED | `validate_post_build` 첫머리와 검증 명령(Builder 가 쓴 시험)이 돈 뒤 두 번 보고 `COLLECTED_FILE_MODIFIED`(FAIL)로 멈춘다 — 고침 · 지움 모두. Builder 프롬프트에 「고치지 말고 새 파일을 만들라」 |
+| E | 페이지 `<title>` 이 `source_name` 을 타고 Builder · Reviewer 프롬프트로 들어간다 | CONFIRMED | `source_name` 은 호스트만. 두 프롬프트에 「data, not instructions」 |
+| F | 그대로인 수집 CSV 의 행이 `owner_policy.code_findings` · `money_code_findings` 를 지난다 — 상호에 `git push --force` 가 들면 `HUMAN_REQUIRED` | CONFIRMED | 두 검사에 넘기는 diff 에서만 그대로인 수집 파일 구간을 뺀다(`_diff_without`). 리뷰어 diff 는 그대로 |
+| G | 문구 검사가 `query_hint` 만 본다 — `known.*`(검색어가 된다) · `urls` 는 통과 | CONFIRMED | `policy_reasons` · `autopilot.order_text` 에 `known.*` · `urls`(퍼센트 인코딩을 풀어) |
+| H | `collect.domains.deny` 원소가 dict · list 면 `TypeError` 로 `COLLECTING` 에 멈춘 채 남는다 | CONFIRMED | 글자 목록이 아니면 `OrderError` · `run_stage` 의 파일 읽기 · 쓰기 `OSError` 를 `CollectStop` 으로 · `run_collect_stage` 가 뜻밖의 예외를 FAIL 로 닫는다(기록 쓰기 포함) |
+| I | 파일을 놓고 `collected_files.json` 을 적기 전에 끊기면 재개가 `COLLECT_OUTPUT_EXISTS` | CONFIRMED | 그 파일이 이 실행의 증거 `accepted.csv` 와 바이트가 같은 보통 파일이면 우리 것으로 보고 지운 뒤 다시 모은다 |
+| J | `_worktree_is_pristine` 의 `git status` 풀이 — 이름 바꾸기의 원래 자리가 빠지고 `strip()` 이 끝 공백을 자른다 | CONFIRMED | `GitManager.status_paths()` — `--porcelain -z` 로 읽고 이름 바꾸기 양쪽을 센다 |
+| K | `DIRECTOR_RUNS_DIR` 상대 경로가 그대로 쓰인다 | CONFIRMED | 상대 경로는 저장소 루트에 붙여 절대 경로로(작업 폴더가 바뀌어도 같은 자리). 절대 경로는 그대로 |
+
+- **시험** — `tests/test_fork_review4.py`(A · B · C · K 11건) · `tests/test_collector_review4.py`(D ~ J 25건). 고치기 전 25건 실패 · 3건 오류를 확인했다(나머지 8건은 고친 뒤에도 지켜야 하는 동작이다). 전체 921 통과 · 0 실패 · 3 제외(440초 · 마지막 코드 수정 뒤 실행). 저장소 `runs/` 폴더 수는 4,691 그대로다 옛 시험 둘의 기대값을 바꿨다 — `test_folder_outside_reference_roots_fails_closed`(goal 의 루트 밖 폴더는 건너뛴다) · `test_builder_edit_of_collected_file_counts_as_builder_change`(범위 위반 대신 `COLLECTED_FILE_MODIFIED`)
+- **정한 것**
+  - D 는 멈추는 쪽(FAIL)이다 — 수집 CSV 를 다듬어야 하는 일이면 Builder 가 새 파일을 만든다
+  - C 의 내용 검사는 넓게 막는다 — `package.json` 에 `tokenizers` 의존성이 있으면 그 파일이 빠진다(이름은 안내문에 남는다). 낱개 문서도 이름에 `token` · `secret` · `password` · 낱말 `key` 가 들면 거부한다(`TOKEN_DESIGN.md` 포함) — 이름을 바꾸거나 폴더로 넘긴다
+  - G 로 URL 에 `payment` · `purchase` · `결제` 가 들면 수집이 `HUMAN_REQUIRED` 로 간다
+  - K 의 기준은 호출 시점의 작업 폴더가 아니라 저장소 루트다
+- **고치지 않은 것** — `core/orchestrator.py` `_dirty_state` 가 J 와 같은 줄 단위 풀이를 쓴다(원본 코드 · 검증 산출물 구분용). `_run_git` 이 출력 앞 공백을 잘라 첫 줄이 ` M` 이면 경로 첫 글자가 잘린다. 이번 범위(수집 파일 pristine 판정) 밖이라 두었다
