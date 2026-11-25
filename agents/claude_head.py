@@ -261,6 +261,11 @@ class ClaudeHead(BaseHead):
             '      "requires_human_approval": false\n'
             '  }\n'
             "}\n\n"
+            # 포크(2026-11-25 실측): 대화 경로에도 collect 형식을 알린다 — 모르면 HEAD 가 자유 글로 써 검증에서 죽는다
+            "The ORDER object follows exactly this schema (no other keys): " + self.ORDER_SCHEMA_TEXT + "\n"
+            "WEB DATA: the Builder cannot read the web. When the task needs facts from the web, fill \"collect\" "
+            "exactly as in that schema (targets is a LIST of objects, output is an OBJECT with schema and path); "
+            "otherwise set it to null. The Director fetches and verifies; never ask the Builder to invent data.\n\n"
             "RISK LEVEL GUIDANCE (HIGH always halts for human approval before the Builder runs - use it "
             "for real-world exposure, not for ambition):\n"
             "- 'HIGH': the goal could submit a real broker/exchange order, touch live credentials or an "
@@ -281,11 +286,21 @@ class ClaudeHead(BaseHead):
         )
 
         proj_dir = project_context.get("project_path")
-        raw_output = self._invoke_cli(prompt, cwd=proj_dir)
-        data = self._extract_json(raw_output)
-        if data.get("type") not in ("QUESTION", "DEV_TASK"):
-            raise ValueError("Invalid chat response type")
-        if data["type"] == "DEV_TASK":
-            # validate order schema implicitly
-            OrderSchema.model_validate(data.get("order", {}))
+        from pydantic import ValidationError
+        # 포크: ORDER 가 형식에 어긋나면 오류를 붙여 한 번만 다시 묻는다. 두 번째도 어긋나면 그대로 실패한다
+        for attempt in range(2):
+            raw_output = self._invoke_cli(prompt, cwd=proj_dir)
+            data = self._extract_json(raw_output)
+            if data.get("type") not in ("QUESTION", "DEV_TASK"):
+                raise ValueError("Invalid chat response type")
+            if data["type"] != "DEV_TASK":
+                return data
+            try:
+                OrderSchema.model_validate(data.get("order", {}))
+                return data
+            except ValidationError as exc:
+                if attempt == 1:
+                    raise
+                prompt += ("\n\nYOUR PREVIOUS ORDER FAILED SCHEMA VALIDATION:\n" + str(exc)[:2000] +
+                           "\nAnswer again with the whole JSON object, fixing exactly these fields.")
         return data
